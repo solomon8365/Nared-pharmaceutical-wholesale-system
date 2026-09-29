@@ -1,0 +1,10 @@
+CREATE TABLE IF NOT EXISTS product_batches (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    product_id INT UNSIGNED NOT NULL,
+    batch_number VARCHAR(100) NOT NULL,
+    expiry_date DATE NOT NULL,
+    quantity INT NOT NULL DEFAULT 0,
+    purchase_price DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE CASCADE
+);

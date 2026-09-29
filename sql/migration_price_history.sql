@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS price_history (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    product_id INT UNSIGNED NOT NULL,
+    old_price DECIMAL(10,2) NULL,
+    new_price DECIMAL(10,2) NOT NULL,
+    changed_by INT UNSIGNED NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE CASCADE
+);

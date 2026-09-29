@@ -1,0 +1,22 @@
+# Database backups contain real customer data — never commit
+backups/
+
+# Dependencies
+node_modules/
+
+# Runtime user uploads (product images / payment screenshots)
+uploads/
+
+# Local tooling / editor
+.agents/
+.vscode/
+.idea/
+
+# Temp / debug artifacts
+temp_hex.txt
+_cook.txt
+test-connection.php
+_logo_check.php
+*.bak
+*.bak-phase1
+*.log

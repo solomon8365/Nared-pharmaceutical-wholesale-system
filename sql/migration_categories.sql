@@ -1,0 +1,11 @@
+CREATE TABLE IF NOT EXISTS categories (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(150) NOT NULL UNIQUE,
+    description TEXT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE products ADD COLUMN category_id INT UNSIGNED NULL AFTER description;
+
+ALTER TABLE products ADD CONSTRAINT fk_products_category
+    FOREIGN KEY (category_id) REFERENCES categories (id) ON DELETE SET NULL;
