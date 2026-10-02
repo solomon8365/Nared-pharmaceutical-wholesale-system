@@ -2,6 +2,8 @@
 require_once __DIR__ . '/../services/init.php';
 requirePermission('customers', 'view');
 $pdo = getPDO();
+require_once __DIR__ . '/../includes/auto_migrate.php';
+ensureCustomerSelfRegistrationMigration($pdo);
 $messages = [];
 
 $editCustomer = null;
@@ -25,6 +27,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $customerId = (int) ($_POST['customer_id'] ?? 0);
         $res = CustomerService::update($pdo, $customerId, $_POST, (int) ($_SESSION['user']['id'] ?? 0));
         $messages[] = ['type' => $res['success'] ? 'success' : 'error', 'text' => $res['msg']];
+    } elseif ($action === 'approve_registration') {
+        requirePermission('customers', 'approve');
+        $userId = (int) ($_POST['user_id'] ?? 0);
+        if ($userId > 0) {
+            $uid = (int) ($_SESSION['user']['id'] ?? 0);
+            try {
+                $pdo->beginTransaction();
+                $pdo->prepare("UPDATE users SET account_status = 'approved', approved_by = ?, approved_at = NOW(), rejection_reason = NULL WHERE id = ? AND role = 'customer'")
+                    ->execute([$uid, $userId]);
+                if ($pdo->query('SELECT ROW_COUNT()')->fetchColumn() < 1) {
+                    throw new RuntimeException('no-op');
+                }
+                $cid = $pdo->prepare('SELECT customer_id FROM users WHERE id = ?');
+                $cid->execute([$userId]);
+                $customerId = $cid->fetchColumn();
+                if ($customerId) {
+                    $pdo->prepare("UPDATE customers SET customer_status = 'active' WHERE id = ?")->execute([(int) $customerId]);
+                }
+                $pdo->commit();
+                $messages[] = ['type' => 'success', 'text' => 'Registration approved — the customer can now sign in.'];
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) { $pdo->rollBack(); }
+                $messages[] = ['type' => 'error', 'text' => 'Approval failed. The application may already be handled.'];
+            }
+        }
+    } elseif ($action === 'reject_registration') {
+        requirePermission('customers', 'approve');
+        $userId = (int) ($_POST['user_id'] ?? 0);
+        $reason = trim($_POST['rejection_reason'] ?? '');
+        if ($userId > 0) {
+            $uid = (int) ($_SESSION['user']['id'] ?? 0);
+            $pdo->prepare("UPDATE users SET account_status = 'rejected', approved_by = ?, approved_at = NOW(), rejection_reason = ? WHERE id = ? AND role = 'customer'")
+                ->execute([$uid, $reason !== '' ? mb_substr($reason, 0, 255) : 'Not approved', $userId]);
+            $cid = $pdo->prepare('SELECT customer_id FROM users WHERE id = ?');
+            $cid->execute([$userId]);
+            $customerId = $cid->fetchColumn();
+            if ($customerId) {
+                $pdo->prepare("UPDATE customers SET customer_status = 'inactive' WHERE id = ?")->execute([(int) $customerId]);
+            }
+            $messages[] = ['type' => 'success', 'text' => 'Registration rejected. The customer cannot sign in.'];
+        }
     } elseif (isset($_POST['create_customer_login'])) {
         requirePermission('customers', 'create');
         $res = CustomerService::createPortalLogin($pdo, (int) ($_POST['link_customer_id'] ?? 0), trim($_POST['new_username'] ?? ''), $_POST['new_password'] ?? '', (int) ($_SESSION['user']['id'] ?? 0));
@@ -42,6 +85,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $search = trim($_GET['search'] ?? '');
 $customers = CustomerService::list($pdo, $search);
+
+// Self-registration applications awaiting an administrator decision.
+$pendingUsers = [];
+if (hasPermission('customers', 'approve')) {
+    $pendingUsers = $pdo->query(
+        "SELECT u.id AS user_id, u.username, u.account_status, u.created_at, u.rejection_reason,
+                c.id AS customer_id, c.name, c.customer_type, c.license_number, c.tin_number,
+                c.contact_person, c.phone, c.email, c.physical_address, c.customer_status
+         FROM users u
+         LEFT JOIN customers c ON c.id = u.customer_id
+         WHERE u.role = 'customer' AND u.account_status IN ('pending','rejected')
+         ORDER BY FIELD(u.account_status,'pending','rejected'), u.created_at DESC"
+    )->fetchAll();
+}
+$pendingCount = 0;
+foreach ($pendingUsers as $pu) {
+    if ($pu['account_status'] === 'pending') { $pendingCount++; }
+}
+$canApprove = hasPermission('customers', 'approve');
+$canCreate  = hasPermission('customers', 'create');
+// Applications awaiting a decision become the landing tab.
+$regActive  = $canApprove && $pendingCount > 0;
+$defaultTab = $regActive ? 'cust-reg' : ($canCreate ? 'cust-add' : 'cust-list');
 ?>
 <style>@media(max-width:768px){.mob-grid-2{grid-template-columns:1fr!important}}</style>
 <section>
@@ -92,15 +158,18 @@ $customers = CustomerService::list($pdo, $search);
     <?php endif; ?>
 
     <div class="tab-bar">
-        <?php if (hasPermission('customers', 'create')): ?>
-        <button class="tab-btn <?= hasPermission('customers', 'create') ? 'active' : '' ?>" onclick="switchTab(this,'cust-add')"><i class="fas fa-plus"></i> Add Customer</button>
+        <?php if ($canApprove): ?>
+        <button class="tab-btn<?= $regActive ? ' active' : '' ?>" onclick="switchTab(this,'cust-reg')"><i class="fas fa-user-clock"></i> Registrations<?= $pendingCount > 0 ? ' (' . $pendingCount . ')' : '' ?></button>
+        <?php endif; ?>
+        <?php if ($canCreate): ?>
+        <button class="tab-btn<?= $defaultTab === 'cust-add' ? ' active' : '' ?>" onclick="switchTab(this,'cust-add')"><i class="fas fa-plus"></i> Add Customer</button>
         <button class="tab-btn" onclick="switchTab(this,'cust-portal')"><i class="fas fa-user-lock"></i> Portal Login</button>
         <?php endif; ?>
-        <button class="tab-btn <?= hasPermission('customers', 'create') ? '' : 'active' ?>" onclick="switchTab(this,'cust-list')"><i class="fas fa-list"></i> Customer List</button>
+        <button class="tab-btn<?= $defaultTab === 'cust-list' ? ' active' : '' ?>" onclick="switchTab(this,'cust-list')"><i class="fas fa-list"></i> Customer List</button>
     </div>
     <div class="tab-content">
-        <?php if (hasPermission('customers', 'create')): ?>
-        <div id="cust-add" class="tab-panel <?= hasPermission('customers', 'create') ? 'active' : '' ?>">
+        <?php if ($canCreate): ?>
+        <div id="cust-add" class="tab-panel<?= $defaultTab === 'cust-add' ? ' active' : '' ?>">
             <div class="panel">
                 <h2>Add business customer</h2>
                 <form method="post" class="form-grid" style="max-width:700px">
@@ -158,7 +227,71 @@ $customers = CustomerService::list($pdo, $search);
             </div>
         </div>
         <?php endif; ?>
-        <div id="cust-list" class="tab-panel">
+        <?php if ($canApprove): ?>
+        <div id="cust-reg" class="tab-panel<?= $regActive ? ' active' : '' ?>">
+            <div class="panel">
+                <h2>Customer registrations</h2>
+                <p class="hint">Applications submitted from the public registration page. Verify the <strong>licence number</strong> and <strong>TIN number</strong> before approving — the customer cannot sign in until you do.</p>
+                <div style="overflow-x:auto">
+                <table>
+                    <thead><tr><th>Applied</th><th>Business</th><th>Type</th><th>Licence No.</th><th>TIN</th><th>Contact</th><th>Phone</th><th>Username</th><th>Status</th><th>Decision</th></tr></thead>
+                    <tbody>
+                        <?php if (empty($pendingUsers)): ?>
+                            <tr><td colspan="10">No registrations awaiting approval.</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($pendingUsers as $pu):
+                                $isPending = $pu['account_status'] === 'pending';
+                            ?>
+                                <tr>
+                                    <td style="font-size:0.8rem;white-space:nowrap"><?= htmlspecialchars((string) $pu['created_at']) ?></td>
+                                    <td><?= htmlspecialchars((string) ($pu['name'] ?? '—')) ?><?= !empty($pu['physical_address']) ? '<br><span style="font-size:0.75rem;color:#64748b">' . htmlspecialchars((string) $pu['physical_address']) . '</span>' : '' ?></td>
+                                    <td style="font-size:0.82rem"><?= $pu['customer_type'] ? htmlspecialchars(str_replace('_', ' ', ucfirst((string) $pu['customer_type']))) : '—' ?></td>
+                                    <td style="font-size:0.82rem"><strong><?= htmlspecialchars((string) ($pu['license_number'] ?? '—')) ?></strong></td>
+                                    <td style="font-size:0.82rem"><strong><?= htmlspecialchars((string) ($pu['tin_number'] ?? '—')) ?></strong></td>
+                                    <td><?= htmlspecialchars((string) ($pu['contact_person'] ?? '')) ?></td>
+                                    <td style="font-size:0.82rem"><?= htmlspecialchars((string) ($pu['phone'] ?? '')) ?></td>
+                                    <td style="font-size:0.82rem"><?= htmlspecialchars((string) $pu['username']) ?></td>
+                                    <td>
+                                        <?php if ($isPending): ?>
+                                            <span style="display:inline-block;padding:2px 6px;border-radius:3px;font-size:0.72rem;font-weight:700;background:#f59e0b20;color:#b45309">Pending</span>
+                                        <?php else: ?>
+                                            <span style="display:inline-block;padding:2px 6px;border-radius:3px;font-size:0.72rem;font-weight:700;background:#dc262620;color:#b91c1c" title="<?= htmlspecialchars((string) ($pu['rejection_reason'] ?? '')) ?>">Rejected</span>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td>
+                                        <?php if ($isPending): ?>
+                                            <form method="post" style="display:inline">
+                                                <?= csrf_field() ?>
+                                                <input type="hidden" name="_action" value="approve_registration">
+                                                <input type="hidden" name="user_id" value="<?= (int) $pu['user_id'] ?>">
+                                                <button type="submit" style="padding:4px 12px;font-size:0.82rem"><i class="fas fa-check"></i> Approve</button>
+                                            </form>
+                                            <form method="post" style="display:inline-flex;gap:6px;align-items:center;margin-top:6px">
+                                                <?= csrf_field() ?>
+                                                <input type="hidden" name="_action" value="reject_registration">
+                                                <input type="hidden" name="user_id" value="<?= (int) $pu['user_id'] ?>">
+                                                <input type="text" name="rejection_reason" placeholder="Reason (optional)" style="margin:0;padding:4px 8px;font-size:0.8rem;width:150px">
+                                                <button type="submit" class="btn-danger" style="padding:4px 10px;font-size:0.82rem">Reject</button>
+                                            </form>
+                                        <?php else: ?>
+                                            <form method="post" style="display:inline">
+                                                <?= csrf_field() ?>
+                                                <input type="hidden" name="_action" value="approve_registration">
+                                                <input type="hidden" name="user_id" value="<?= (int) $pu['user_id'] ?>">
+                                                <button type="submit" style="padding:4px 12px;font-size:0.82rem"><i class="fas fa-rotate-left"></i> Approve anyway</button>
+                                            </form>
+                                        <?php endif; ?>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
+        <div id="cust-list" class="tab-panel<?= $defaultTab === 'cust-list' ? ' active' : '' ?>">
             <div class="panel">
                 <h2>Customer list</h2>
                 <form method="get" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">

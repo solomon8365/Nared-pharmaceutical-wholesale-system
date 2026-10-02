@@ -62,8 +62,9 @@ try {
     }
 } catch (Throwable $e) { /* keep server default if invalid */ }
 
-// Single maintenance-mode gate: non-admin users are redirected to login.
-if (SettingsService::maintenanceMode() && !isAdmin()) {
+// Single maintenance-mode gate: only the Super Admin keeps access so a
+// Manager account cannot lock the business out of its own system.
+if (SettingsService::maintenanceMode() && !isSuperAdmin()) {
     if ($page !== 'login') {
         header('Location: index.php?page=login');
         exit;
@@ -268,10 +269,10 @@ if ($__isAjax) {
     preg_match_all('/<div\s+class="notice notice-(success|error)"[^>]*>(.*?)<\/div>/si', $__html, $__n, PREG_SET_ORDER | PREG_UNMATCHED_AS_NULL);
     $__alerts = [];
     foreach ($__a[1] as $__i => $__type) {
-        $__alerts[] = ['type' => $__type, 'text' => strip_tags(html_entity_decode($__a[2][$__i]))];
+        $__alerts[] = ['type' => $__type, 'text' => trim(strip_tags(html_entity_decode($__a[2][$__i])))];
     }
     foreach ($__n as $__m) {
-        $__alerts[] = ['type' => $__m[1], 'text' => strip_tags(html_entity_decode($__m[2]))];
+        $__alerts[] = ['type' => $__m[1], 'text' => trim(strip_tags(html_entity_decode($__m[2])))];
     }
 
     $__hasError = false;

@@ -280,7 +280,7 @@ if ($canCredit) $opsLinks[] = ['Credit Management', 'fa-file-invoice-dollar', 'i
 if ($canFinance) $opsLinks[] = ['Finance Center', 'fa-piggy-bank', 'index.php?page=finance_dashboard'];
 if ($canReports) $opsLinks[] = ['Reports', 'fa-chart-line', 'index.php?page=reports'];
 
-$dashRoleLabel = match ($dashRoleId) { 1 => 'System Administrator', 4 => 'Finance Officer', 3 => 'Delivery Staff', 5 => 'Store Manager', 2 => 'Customer', default => ucfirst($user['role'] ?? 'User') };
+$dashRoleLabel = match ((string) ($user['role'] ?? '')) { 'admin' => 'Super Admin', 'manager' => 'Manager', 'finance' => 'Finance Officer', 'delivery' => 'Delivery Staff', 'store_manager' => 'Store Manager', 'customer' => 'Customer', 'salesperson' => 'Salesperson', default => ucfirst((string) ($user['role'] ?: 'User')) };
 ?>
 <section class="dash">
 <style>

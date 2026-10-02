@@ -27,15 +27,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($stmt->fetch()) {
                 $errors[] = 'Username already taken.';
             } else {
-                $roleRow = $pdo->prepare('SELECT name, is_system FROM roles WHERE id = :id');
-                $roleRow->execute(['id' => $roleId]);
-                $role = $roleRow->fetch();
-                $enumMap = ['admin' => 'admin', 'customer' => 'customer', 'delivery staff' => 'delivery', 'finance officer' => 'finance', 'salesperson' => 'salesperson', 'store manager' => 'store_manager'];
-                $roleEnum = $enumMap[strtolower($role['name'])] ?? 'admin';
-
-                userCreate($pdo, $username, $password, $fullName, $roleEnum, $roleId);
-                $messages[] = ['type' => 'success', 'text' => "User '{$fullName}' created."];
-            }
+$roleRow = $pdo->prepare('SELECT name, is_system FROM roles WHERE id = :id');
+$roleRow->execute([':id' => $roleId]);
+$role = $roleRow->fetch();
+if (!$role) {
+    $errors[] = 'Selected role no longer exists.';
+} else {
+// Role name (as shown on the Roles page) -> users.role enum value.
+// 'Super Admin' keeps the 'admin' enum: it is the protected root slot.
+$enumMap = ['super admin' => 'admin', 'admin' => 'admin', 'manager' => 'manager', 'customer' => 'customer', 'delivery staff' => 'delivery', 'delivery' => 'delivery', 'finance officer' => 'finance', 'finance' => 'finance', 'salesperson' => 'salesperson', 'store manager' => 'store_manager'];
+$roleEnum = $enumMap[strtolower(trim($role['name']))] ?? null;
+if ($roleEnum === null) {
+    $errors[] = "Role '{$role['name']}' is not linked to a system role type. Rename it to a standard role name or assign its permissions manually.";
+} else {
+userCreate($pdo, $username, $password, $fullName, $roleEnum, $roleId);
+$messages[] = ['type' => 'success', 'text' => "User '{$fullName}' created."];
+}
+}
+}
         }
     }
 

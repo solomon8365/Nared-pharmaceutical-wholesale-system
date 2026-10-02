@@ -767,3 +767,194 @@ function ensureSalespersonOrderApprovalMigration($pdo)
         try { $pdo->exec($sql); } catch (Exception $e) { /* ignore */ }
     }
 }
+
+/**
+ * Customer self-registration with admin approval.
+ *
+ * A customer applies from the public register page using their trade licence
+ * and TIN number. The account is created in 'pending' state and cannot sign in
+ * until an admin approves it (customers.approve). Existing rows default to
+ * 'approved' so no current user is locked out.
+ *
+ * licence/TIN uniqueness is enforced by unique indexes where the existing data
+ * permits it; otherwise pages/register.php still rejects duplicates in code.
+ * Idempotent.
+ */
+function ensureCustomerSelfRegistrationMigration($pdo)
+{
+    static $done = false;
+    if ($done) return;
+    $done = true;
+
+    // ── users: approval workflow columns ─────────────────────────────────
+    $userCols = [
+        'account_status'    => "ENUM('pending','approved','rejected') NOT NULL DEFAULT 'approved'",
+        'approved_by'       => 'INT UNSIGNED NULL DEFAULT NULL',
+        'approved_at'       => 'DATETIME NULL DEFAULT NULL',
+        'rejection_reason'  => 'VARCHAR(255) NULL DEFAULT NULL',
+    ];
+    foreach ($userCols as $col => $def) {
+        $sql = "SET @e=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='users' AND COLUMN_NAME='{$col}');"
+             . "SET @s=IF(@e=0,\"ALTER TABLE users ADD COLUMN {$col} {$def}\",'SELECT 1');"
+             . ' PREPARE p FROM @s; EXECUTE p; DEALLOCATE PREPARE p';
+        try { $pdo->exec($sql); } catch (Exception $e) { /* ignore */ }
+    }
+
+    // ── customers: licence/TIN columns (pre-existing, ensured for safety) ─
+    $custCols = [
+        'license_number' => 'VARCHAR(100) NULL DEFAULT NULL',
+        'tin_number'     => 'VARCHAR(100) NULL DEFAULT NULL',
+    ];
+    foreach ($custCols as $col => $def) {
+        $sql = "SET @e=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='customers' AND COLUMN_NAME='{$col}');"
+             . "SET @s=IF(@e=0,\"ALTER TABLE customers ADD COLUMN {$col} {$def}\",'SELECT 1');"
+             . ' PREPARE p FROM @s; EXECUTE p; DEALLOCATE PREPARE p';
+        try { $pdo->exec($sql); } catch (Exception $e) { /* ignore */ }
+    }
+
+    // ── unique indexes, but only when the current data is clean ─────────
+    foreach ([['license_number', 'uq_customers_license'], ['tin_number', 'uq_customers_tin']] as $pair) {
+        [$col, $idx] = $pair;
+        try {
+            if ($pdo->query("SHOW INDEX FROM customers WHERE Key_name = " . $pdo->quote($idx))->fetch()) {
+                continue;
+            }
+            $dupes = $pdo->query(
+                "SELECT {$col} FROM customers
+                 WHERE {$col} IS NOT NULL AND TRIM({$col}) <> ''
+                 GROUP BY {$col} HAVING COUNT(*) > 1 LIMIT 1"
+            )->fetch();
+            if ($dupes) {
+                continue; // duplicates present — uniqueness stays app-enforced
+            }
+            $pdo->exec("ALTER TABLE customers ADD UNIQUE INDEX {$idx} ({$col})");
+        } catch (Exception $e) { /* ignore */ }
+    }
+
+    // ── make sure admins hold the approval permission ───────────────────
+    try {
+        $pdo->prepare("INSERT IGNORE INTO role_permissions (role_id, module, permission) VALUES (1, 'customers', 'approve')")->execute();
+    } catch (Exception $e) { /* ignore */ }
+}
+
+/**
+ * Two-tier administration.
+ *
+ *   role_id 1 (users.role = 'admin')  -> "Super Admin"
+ *       Unrestricted. Its role_permissions rows are ignored: hasPermission()
+ *       short-circuits to ['__all__' => true] for this role, so nobody can
+ *       lock themselves out by editing permissions. Cannot be deleted
+ *       (pages/users.php) and keeps full access even in maintenance mode.
+ *
+ *   "Manager" (users.role = 'manager')
+ *       Day-to-day operations. Inherits every Super Admin permission EXCEPT
+ *       the reserved groups below, so a compromised manager account cannot
+ *       wipe the database, change system settings, mint new admin accounts or
+ *       tamper with the audit trail.
+ *
+ * Reconciliation is cheap and self-healing: it inserts only the permissions
+ * Manager is missing and deletes only reserved ones that leaked in, so a new
+ * module added later is inherited on the next run without a manual sync.
+ */
+function ensureSuperAdminRoleMigration(PDO $pdo): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+
+    // Modules/permissions that only a Super Admin may hold.
+    $reservedModules = ['settings', 'users', 'roles', 'system_sync'];
+    $reservedPerms   = ['backup.restore', 'backup.delete'];
+
+    try {
+        // ── 0. users.role must be able to store 'manager' ────────────────
+        $roleEnum = $pdo->query("SHOW COLUMNS FROM users LIKE 'role'")->fetch();
+        if ($roleEnum && stripos((string) $roleEnum['Type'], "'manager'") === false) {
+            $pdo->exec("ALTER TABLE users MODIFY role ENUM('admin','manager','customer','delivery','finance','salesperson','store_manager') NOT NULL DEFAULT 'admin'");
+        }
+
+        // ── 1. role 1 is labelled "Super Admin" ───────────────────────────
+        $pdo->prepare(
+            "UPDATE roles SET name = 'Super Admin', description = ?, is_system = 1
+             WHERE id = 1 AND (name <> 'Super Admin' OR COALESCE(description, '') <> ?)"
+        )->execute([
+            'Root account. Unrestricted access to every module, backup/restore and system tools. Cannot be deleted.',
+            'Root account. Unrestricted access to every module, backup/restore and system tools. Cannot be deleted.',
+        ]);
+
+        // ── 2. Manager role ───────────────────────────────────────────────
+        $managerId = null;
+        $find = $pdo->prepare('SELECT id FROM roles WHERE LOWER(name) = ? ORDER BY id LIMIT 1');
+        $find->execute(['manager']);
+        if ($row = $find->fetch()) {
+            $managerId = (int) $row['id'];
+            $pdo->prepare(
+                "UPDATE roles SET status = 'active', is_system = 0, description = ?
+                 WHERE id = ? AND COALESCE(description, '') <> ?"
+            )->execute([
+                'Day-to-day operations. Cannot restore/delete backups, change system settings, manage users or roles, or run database repair tools.',
+                $managerId,
+                'Day-to-day operations. Cannot restore/delete backups, change system settings, manage users or roles, or run database repair tools.',
+            ]);
+        } else {
+            $pdo->prepare(
+                "INSERT INTO roles (name, description, is_system, status, color, created_at)
+                 VALUES ('Manager', ?, 0, 'active', '#8b5cf6', NOW())"
+            )->execute(['Day-to-day operations. Cannot restore/delete backups, change system settings, manage users or roles, or run database repair tools.']);
+            $managerId = (int) $pdo->lastInsertId();
+        }
+        if (!$managerId || $managerId === 1) {
+            return; // never let Manager collide with the Super Admin slot
+        }
+
+        // ── 3. Manager inherits Super Admin rights minus the reserved ones ─
+        $isReserved = static function (string $module, string $permission) use ($reservedModules, $reservedPerms): bool {
+            if (in_array($module, $reservedModules, true)) {
+                return true;
+            }
+            return in_array($module . '.' . $permission, $reservedPerms, true);
+        };
+
+        // The reserved operations are enforced in code for role 1, but keep the
+        // rows present so the permissions matrix on the Roles page is truthful
+        // (and so a future bypass removal cannot silently drop them).
+        $ensure = $pdo->prepare('INSERT IGNORE INTO role_permissions (role_id, module, permission) VALUES (1, ?, ?)');
+        foreach ($reservedPerms as $pair) {
+            [$mod, $perm] = explode('.', $pair, 2);
+            $ensure->execute([$mod, $perm]);
+        }
+        foreach ($reservedModules as $mod) {
+            $ensure->execute([$mod, 'view']);
+        }
+
+        $adminRows = $pdo->query('SELECT module, permission FROM role_permissions WHERE role_id = 1')->fetchAll();
+        $held = [];
+        $cur = $pdo->prepare('SELECT module, permission FROM role_permissions WHERE role_id = ?');
+        $cur->execute([$managerId]);
+        foreach ($cur->fetchAll() as $r) {
+            $held[$r['module'] . "\0" . $r['permission']] = true;
+        }
+
+        $add = $pdo->prepare('INSERT IGNORE INTO role_permissions (role_id, module, permission) VALUES (?, ?, ?)');
+        foreach ($adminRows as $r) {
+            if ($isReserved((string) $r['module'], (string) $r['permission'])) {
+                continue;
+            }
+            if (isset($held[$r['module'] . "\0" . $r['permission']])) {
+                continue;
+            }
+            $add->execute([$managerId, $r['module'], $r['permission']]);
+        }
+
+        $drop = $pdo->prepare('DELETE FROM role_permissions WHERE role_id = ? AND module = ? AND permission = ?');
+        $heldRows = $pdo->prepare('SELECT module, permission FROM role_permissions WHERE role_id = ?');
+        $heldRows->execute([$managerId]);
+        foreach ($heldRows->fetchAll() as $r) {
+            if ($isReserved((string) $r['module'], (string) $r['permission'])) {
+                $drop->execute([$managerId, $r['module'], $r['permission']]);
+            }
+        }
+    } catch (Exception $e) { /* never block the request on this migration */ }
+}

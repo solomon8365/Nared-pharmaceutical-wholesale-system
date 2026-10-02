@@ -22,8 +22,12 @@ function wiMovementType(string $refType, string $reason): string {
 
 function wiBadge(string $type): string {
     $map = [
-        'Available' => ['#ecfdf5','#047857'],['Low Stock' => ['#fffbeb','#b45309']],['Out of Stock' => ['#fef2f2','#b91c1c']],
-        'Expiring Soon' => ['#fff7ed','#c2410c'],['Expired' => ['#fef2f2','#991b1b']],['Quarantine' => ['#fdf4ff','#9333ea']],
+        'Available' => ['#ecfdf5','#047857'],
+        'Low Stock' => ['#fffbeb','#b45309'],
+        'Out of Stock' => ['#fef2f2','#b91c1c'],
+        'Expiring Soon' => ['#fff7ed','#c2410c'],
+        'Expired' => ['#fef2f2','#991b1b'],
+        'Quarantine' => ['#fdf4ff','#9333ea'],
     ];
     [$bg,$fg] = $map[$type] ?? ['#f3f4f6','#374151'];
     return '<span class="status-badge" style="background:'.$bg.';color:'.$fg.';border:1px solid '.$fg.'">'.htmlspecialchars($type).'</span>';

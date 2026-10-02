@@ -98,7 +98,7 @@ document.addEventListener('DOMContentLoaded', function() {
     <p class="del-subtitle">Assign or reassign drivers to approved orders — select multiple orders for bulk assignment</p>
 
     <?php foreach ($messages as $m): ?>
-        <div class="del-notif del-notif-<?= $m['type'] === 'success' ? 'success' : 'critical' ?>">
+        <div class="alert alert-<?= $m['type'] === 'success' ? 'success' : 'error' ?>" style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
             <i class="fas <?= $m['type'] === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle' ?>"></i>
             <?= htmlspecialchars($m['text']) ?>
         </div>

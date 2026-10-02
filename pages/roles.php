@@ -140,6 +140,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $roleId = (int) ($_POST['role_id'] ?? 0);
                 if ($roleId <= 0) {
                     $errors[] = 'Invalid role.';
+                } elseif ($roleId === 1) {
+                    // The root slot is referenced by code (role_id 1 = Super Admin
+                    // bypass), so its name must never be edited out from under it.
+                    $pdo->prepare("UPDATE roles SET name = 'Super Admin', description = :d, status = :s, color = :c WHERE id = 1")
+                        ->execute(['d' => $description, 's' => $status, 'c' => $color]);
+                    $messages[] = ['type' => 'success', 'text' => 'Super Admin role updated (name is fixed).'];
                 } else {
                     $pdo->prepare('UPDATE roles SET name = :n, description = :d, status = :s, color = :c WHERE id = :id')
                         ->execute(['n' => $name, 'd' => $description, 's' => $status, 'c' => $color, 'id' => $roleId]);
@@ -151,6 +157,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $submitted = $_POST['perms'] ?? [];
                 $existing = $rolePermissions[$roleId] ?? [];
                 $merged = $submitted;
+                // Reserved operations (backup restore/delete, system settings,
+                // user & role management, database repair) belong to the Super
+                // Admin only — strip them from every other role on save.
+                if ($roleId !== 1) {
+                    $reservedModules = ['settings', 'users', 'roles', 'system_sync'];
+                    $reservedPerms = ['backup' => ['restore', 'delete']];
+                    $stripped = 0;
+                    foreach ($reservedModules as $mod) {
+                        if (isset($merged[$mod])) {
+                            unset($merged[$mod]);
+                            $stripped++;
+                        }
+                    }
+                    foreach ($reservedPerms as $mod => $perms) {
+                        if (!isset($merged[$mod])) {
+                            continue;
+                        }
+                        foreach ($perms as $perm) {
+                            if (isset($merged[$mod][$perm])) {
+                                unset($merged[$mod][$perm]);
+                                $stripped++;
+                            }
+                        }
+                        if (!$merged[$mod]) {
+                            unset($merged[$mod]);
+                        }
+                    }
+                    if ($stripped > 0) {
+                        $messages[] = ['type' => 'error', 'text' => 'Blocked ' . $stripped . ' reserved permission(s): backup restore/delete, system settings, user & role management and database repair tools can only be granted to the Super Admin role.'];
+                    }
+                }
                 $legacyPairs = [];
                 // Preserve any legacy (module, permission) pairs not represented in this UI
                 foreach ($existing as $mod => $permMap) {
@@ -501,7 +538,7 @@ foreach ($groups as $g) foreach ($g['modules'] as $m) $totalPermCount += count($
                 </div>
                 <?php endforeach; ?>
             </form>
-            <div class="rp-hint"><i class="fas fa-info-circle"></i> Permissions apply when a user is assigned this role. The built-in Administrator role always has full access and cannot be edited.</div>
+            <div class="rp-hint"><i class="fas fa-info-circle"></i> Permissions apply when a user is assigned this role. The <strong>Super Admin</strong> role always has full access and cannot be edited away — its permissions are bypassed in code. Backup restore/delete, system settings, user &amp; role management and database repair tools are reserved for it and are stripped from every other role.</div>
             <?php endif; ?>
         </main>
     </div>

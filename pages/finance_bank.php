@@ -559,7 +559,7 @@ $balanceColors = ['active' => 'var(--fin-green)', 'frozen' => 'var(--fin-blue)',
 </div>
 
 <?php foreach ($messages as $m): ?>
-<div class="bnk-msg <?= $m['type'] ?>"><i class="fas fa-<?= $m['type']==='success'?'check-circle':'exclamation-circle' ?>"></i> <?= htmlspecialchars($m['text']) ?></div>
+<div class="alert alert-<?= ($m['type'] ?? '') === 'success' ? 'success' : 'error' ?>" style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><i class="fas fa-<?= ($m['type'] ?? '') === 'success' ? 'check-circle' : 'exclamation-circle' ?>"></i> <?= htmlspecialchars($m['text']) ?></div>
 <?php endforeach; ?>
 
 <div class="fin-tabs">

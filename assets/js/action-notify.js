@@ -47,7 +47,8 @@
   var APPROVE_KEYWORDS = /^(approve|approv|confirm|resume|resum|activate|activ|verify|verif|complete|complet|process|publish|match|assign|submit|receive|receiv|mark_approved|ready_for_delivery|hand_over_pickup)$/;
   var PAID_KEYWORDS     = /(^|_)(paid|payment|pay_now|record_payment|set_paid|mark_paid|make_payment|deposit|settle|settlement)(_|$)/;
   var PACK_KEYWORDS     = /^(pack|packed|mark_packed|prepare|prepar|mark_prepared|start_preparing|stock_check|reserve_stock|hand_over)$/;
-  var DELIVER_KEYWORDS  = /^(deliver|deliver|delivered|mark_delivered|complete_delivery|out_for_delivery|fulfill)$/;
+  var DELIVER_KEYWORDS  = /^(deliver|deliver|delivered|mark_delivered|complete_delivery|fulfill)$/;
+var DISPATCH_KEYWORDS = /^(dispatch|dispatched|mark_out_for_delivery|out_for_delivery)$/;
   var DELETE_KEYWORDS   = /^(delete|delet|clear|cancel|reject|suspend|void|dispose|dispos|quarantine|quarantin|reverse|write_off|writeoff|unconfirm|wipe|remove|deactivate|inactiv)$/;
 
   function getAction(form) { return getVal(form, '_action') || getVal(form, 'action'); }
@@ -62,6 +63,7 @@
 
     if (DELETE_KEYWORDS.test(action) || /delet|remov|clear|reject|cancel|suspend|write.?off|deactiv/i.test(txt)) return 'deleted';
     if (PAID_KEYWORDS.test(action) || /paid|payment|pay_now|settle/i.test(txt)) return 'paid';
+    if (DISPATCH_KEYWORDS.test(action) || /dispatch/i.test(txt)) return 'dispatched';
     if (DELIVER_KEYWORDS.test(action) || /deliver/i.test(txt)) return 'delivered';
     if (PACK_KEYWORDS.test(action) || /pack|prepare/i.test(txt)) return 'packed';
     if (APPROVE_KEYWORDS.test(action) || /approve|confirm|complete|activate|verify|receive|assign/i.test(txt)) return 'approved';
@@ -95,6 +97,15 @@
       badgeClass: 'iffn-badge-blue',
       badgeText: '<i class="fas fa-box-open" style="margin-right:4px"></i> PACKED',
       msg: 'Order successfully packed and prepared!',
+      confirmBg: '#2563eb'
+    },
+    dispatched: {
+      icon: 'fa-truck',
+      iconBg: 'linear-gradient(135deg,#ea580c,#c2410c)',
+      iconColor: '#ea580c',
+      badgeClass: 'iffn-badge-amber',
+      badgeText: '<i class="fas fa-truck" style="margin-right:4px"></i> DISPATCHED',
+      msg: 'Order dispatched and out for delivery!',
       confirmBg: '#2563eb'
     },
     delivered: {

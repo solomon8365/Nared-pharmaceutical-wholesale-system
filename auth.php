@@ -200,9 +200,27 @@ function userRole(): string
     return $u['role'] ?? 'admin';
 }
 
+/**
+ * "Power user" — the two administration tiers (Super Admin and Manager).
+ *
+ * Kept true for Manager so the existing navigation/feature gates written
+ * against isAdmin() keep working after the Admin role was split. The
+ * dangerous operations are gated by the permission system or isSuperAdmin()
+ * instead, never by this function.
+ */
 function isAdmin(): bool
 {
-    return currentUser() !== null && userRole() === 'admin';
+    return currentUser() !== null && in_array(userRole(), ['admin', 'manager'], true);
+}
+
+/**
+ * Root account (role_id 1). Only this account bypasses the permission system
+ * and may restore/delete backups, change system settings, manage users and
+ * roles, run database repair tools, or enter the site during maintenance.
+ */
+function isSuperAdmin(): bool
+{
+    return currentUser() !== null && userRole() === 'admin' && getUserRoleId() === 1;
 }
 
 function isCustomer(): bool
@@ -494,7 +512,8 @@ function requirePoCapability(string $cap): void
  *
  * @param string|null $portal 'admin', 'customer', or null for any role (e.g. post-registration)
  *
- * @return string|null null on success; otherwise 'empty', 'invalid_credentials', or 'wrong_portal'
+ * @return string|null null on success; otherwise 'empty', 'invalid_credentials',
+ *                     'wrong_portal', 'pending_approval' or 'account_rejected'
  */
 function loginForPortal(string $username, string $password, ?string $portal): ?string
 {
@@ -507,6 +526,8 @@ function loginForPortal(string $username, string $password, ?string $portal): ?s
     require_once __DIR__ . '/includes/auto_migrate.php';
     ensureSalespersonRoleMigration($pdo);
     ensureStoreManagerRoleMigration($pdo);
+    ensureCustomerSelfRegistrationMigration($pdo);
+    ensureSuperAdminRoleMigration($pdo);
     $stmt = $pdo->prepare('SELECT * FROM users WHERE username = :username LIMIT 1');
     $stmt->execute(['username' => $username]);
     $user = $stmt->fetch();
@@ -516,6 +537,17 @@ function loginForPortal(string $username, string $password, ?string $portal): ?s
     }
 
     $role = $user['role'] ?? 'admin';
+
+    // Self-registered customers stay blocked until an administrator approves
+    // their licence/TIN (pages/customers.php, customers.approve).
+    $accountStatus = $user['account_status'] ?? 'approved';
+    if ($accountStatus === 'pending') {
+        return 'pending_approval';
+    }
+    if ($accountStatus === 'rejected') {
+        return 'account_rejected';
+    }
+
     if ($portal === 'admin' && $role !== 'admin') {
         return 'wrong_portal';
     }

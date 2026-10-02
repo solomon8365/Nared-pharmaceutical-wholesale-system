@@ -141,10 +141,10 @@ $rejectedCount = $pdo->query("SELECT COUNT(*) FROM delivery_returns WHERE status
     <p class="del-subtitle">Manage product returns from customers</p>
 
     <?php if ($success): ?>
-        <div class="del-notif del-notif-success"><i class="fas fa-check-circle"></i> <?= htmlspecialchars($success) ?></div>
+        <div class="alert alert-success"><i class="fas fa-check-circle"></i> <?= htmlspecialchars($success) ?></div>
     <?php endif; ?>
     <?php if ($error): ?>
-        <div class="del-notif del-notif-critical"><i class="fas fa-exclamation-circle"></i> <?= htmlspecialchars($error) ?></div>
+        <div class="alert alert-error"><i class="fas fa-exclamation-circle"></i> <?= htmlspecialchars($error) ?></div>
     <?php endif; ?>
 
     <div class="del-stats">

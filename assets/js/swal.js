@@ -259,8 +259,20 @@
     if (!msg && form.dataset.swalConfirmMsg) msg = form.dataset.swalConfirmMsg;
 
     var btn = submitter;
-    showConfirm(type, msg).then(function (result) {
-      if (!result.isConfirmed) return;
+
+    /* Show the dialog BEFORE relying on it. The native submit was already
+       cancelled above, so if the confirmation UI cannot be shown we must fall
+       back to a real submission — never silently drop the user's action. */
+    var dialog;
+    try {
+      dialog = showConfirm(type, msg);
+    } catch (err) {
+      submitNatively(form, btn);
+      return;
+    }
+
+    Promise.resolve(dialog).then(function (result) {
+      if (!result || !result.isConfirmed) return;
       if (btn && btn.name && btn.value) {
         var existing = form.querySelector('input[data-swal-btn="' + btn.name + '"]');
         if (existing) existing.value = btn.value;
@@ -281,7 +293,21 @@
         form.submit();
         submitting = false;
       }
+    })['catch'](function () {
+      // Confirmation flow broke after the submit was cancelled: submit for real.
+      submitNatively(form, btn);
     });
+  }
+
+  /**
+   * Last-resort real submission, used only when nothing has been sent to the
+   * server yet (the ajax-interceptor is bypassed by form.submit()).
+   */
+  function submitNatively(form, btn) {
+    delete form.dataset.swalConfirmed;
+    delete form.dataset.swalDone;
+    submitting = false;
+    try { form.submit(); } catch (err) { console.error('[swal.js] submit failed', err); }
   }
 
   /* ── Init ──────────────────────────────────────────────────────────── */

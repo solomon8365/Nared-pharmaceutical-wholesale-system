@@ -241,7 +241,7 @@ $chartAccounts = $pdo->query("SELECT * FROM chart_of_accounts ORDER BY account_c
     <div class="fin-subtitle">Chart of accounts, journal entries, trial balance, and financial statements</div>
 
     <?php foreach ($messages as $m): ?>
-        <div style="padding:10px 14px;border-radius:8px;margin-bottom:12px;background:<?= $m['type'] === 'success' ? '#dcfce7' : '#fee2e2' ?>;color:<?= $m['type'] === 'success' ? '#166534' : '#991b1b' ?>"><?= htmlspecialchars($m['text']) ?></div>
+        <div class="alert alert-<?= ($m['type'] ?? '') === 'success' ? 'success' : 'error' ?>"><?= htmlspecialchars($m['text']) ?></div>
     <?php endforeach; ?>
 
     <div class="fin-stats">

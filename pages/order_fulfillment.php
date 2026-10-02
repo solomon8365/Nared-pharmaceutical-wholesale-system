@@ -374,9 +374,8 @@ function ofFEfoPlan(array $batches, int $ordered): array
     </div>
 
     <?php foreach ($messages as $m): ?>
-        <div style="padding:12px 18px;border-radius:10px;margin-bottom:14px;font-size:.85rem;font-weight:600;display:flex;align-items:center;gap:10px;background:<?= $m['success'] ? '#f0fdf4' : '#fef2f2' ?>;border:1px solid <?= $m['success'] ? '#bbf7d0' : '#fecaca' ?>;color:<?= $m['success'] ? '#166534' : '#991b1b' ?>">
-            <i class="fas fa-<?= $m['success'] ? 'check-circle' : 'exclamation-triangle' ?>"></i>
-            <?= htmlspecialchars($m['msg'] ?? $m['text'] ?? '') ?>
+        <div class="alert alert-<?= $m['success'] ? 'success' : 'error' ?>">
+            <i class="fas fa-<?= $m['success'] ? 'check-circle' : 'exclamation-triangle' ?>"></i> <?= htmlspecialchars($m['msg'] ?? $m['text'] ?? '') ?>
         </div>
     <?php endforeach; ?>
 

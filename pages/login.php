@@ -37,6 +37,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($code === 'invalid_credentials') {
                 record_login_attempt();
                 $errors[] = 'Invalid username or password.';
+            } elseif ($code === 'pending_approval') {
+                $errors[] = 'Your registration is awaiting administrator approval. Your licence and TIN must be verified before you can sign in.';
+            } elseif ($code === 'account_rejected') {
+                $errors[] = 'Your registration was not approved. Please contact NARED General Trading PLC for assistance.';
             } else {
                 clear_login_attempts();
                 if (isDeliveryStaff()) {

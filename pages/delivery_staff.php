@@ -147,7 +147,7 @@ $performanceData = $pdo->query("SELECT id, full_name, total_deliveries, successf
 
     <?php if (!empty($messages)): ?>
         <?php foreach ($messages as $m): ?>
-            <div class="del-notif del-notif-<?= $m['type'] === 'success' ? 'success' : 'critical' ?>" style="margin-bottom:12px">
+            <div class="alert alert-<?= $m['type'] === 'success' ? 'success' : 'error' ?>" style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
                 <i class="fas <?= $m['type'] === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle' ?>"></i>
                 <?= htmlspecialchars($m['text']) ?>
             </div>

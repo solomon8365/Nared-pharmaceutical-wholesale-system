@@ -271,8 +271,8 @@ function fpMethodBadge(string $method): string {
     </div>
 
     <?php foreach ($messages as $m): ?>
-        <div style="padding:12px 18px;border-radius:10px;margin-bottom:14px;font-size:.85rem;font-weight:600;display:flex;align-items:center;gap:10px;background:<?= $m['type'] === 'success' ? '#f0fdf4' : ($m['type'] === 'error' ? '#fef2f2' : '#eff6ff') ?>;border:1px solid <?= $m['type'] === 'success' ? '#bbf7d0' : ($m['type'] === 'error' ? '#fecaca' : '#bfdbfe') ?>;color:<?= $m['type'] === 'success' ? '#166534' : ($m['type'] === 'error' ? '#991b1b' : '#1e40af') ?>">
-            <i class="fas fa-<?= $m['type'] === 'success' ? 'check-circle' : ($m['type'] === 'error' ? 'exclamation-triangle' : 'info-circle') ?>"></i>
+        <div class="alert alert-<?= ($m['type'] ?? '') === 'success' ? 'success' : 'error' ?>" style="display:flex;align-items:center;gap:10px">
+            <i class="fas fa-<?= ($m['type'] ?? '') === 'success' ? 'check-circle' : 'exclamation-triangle' ?>"></i>
             <?= htmlspecialchars($m['text']) ?>
         </div>
     <?php endforeach; ?>

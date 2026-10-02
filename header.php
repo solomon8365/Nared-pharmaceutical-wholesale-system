@@ -99,20 +99,20 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
     <title><?= htmlspecialchars($pageTitle) ?> — <?= htmlspecialchars(APP_NAME) ?></title>
     <?= favicon_tags() ?>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <link rel="stylesheet" href="assets/css/style.css?v=14">
+    <link rel="stylesheet" href="assets/css/style.css?v=15">
     <link rel="stylesheet" href="assets/css/portal.css?v=1">
     <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.all.min.js"></script>
-    <script src="assets/js/action-notify.js?v=4"></script>
-    <script src="assets/js/swal.js?v=7"></script>
+    <script src="assets/js/action-notify.js?v=5"></script>
+    <script src="assets/js/swal.js?v=8"></script>
     <script src="assets/js/app.js?v=10"></script>
     <script src="assets/js/toast.js?v=2"></script>
     <script src="assets/js/scanner.js?v=2"></script>
     <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-    <script>var csrfToken = '<?= csrf_token() ?>';var SESSION_TIMEOUT_MINUTES = <?= (int) sessionTimeoutMinutes() ?>;function toggleSettingsMenu(e){e.stopPropagation();var m=document.getElementById('settings-menu');m.style.display=m.style.display==='block'?'none':'block'}function toggleHelpMenu(e){e.stopPropagation();var m=document.getElementById('help-menu');m.style.display=m.style.display==='block'?'none':'block'}document.addEventListener('click',function(){var m1=document.getElementById('settings-menu'),m2=document.getElementById('help-menu');if(m1)m1.style.display='none';if(m2)m2.style.display='none'})</script>
-    <script src="assets/js/ajax-interceptor.js?v=7"></script>
+    <script>var csrfToken = '<?= csrf_token() ?>';var SESSION_TIMEOUT_MINUTES = <?= (int) sessionTimeoutMinutes() ?>;document.addEventListener('DOMContentLoaded',function(){var wrap=document.querySelector('.th-profile'),btn=document.getElementById('th-profile-btn'),menu=document.getElementById('th-profile-menu');if(!wrap||!btn||!menu)return;function list(){return Array.prototype.slice.call(menu.querySelectorAll('.th-menu-item')).filter(function(el){return !el.disabled&&el.offsetParent!==null;});}function isOpen(){return !menu.hidden;}function open(){menu.hidden=false;btn.setAttribute('aria-expanded','true');}function close(focus){menu.hidden=true;btn.setAttribute('aria-expanded','false');if(focus)btn.focus();}btn.addEventListener('click',function(e){e.stopPropagation();if(isOpen()){close(false);}else{open();}});document.addEventListener('click',function(e){if(isOpen()&&!e.target.closest('.th-profile'))close(false);});btn.addEventListener('keydown',function(e){var k=e.key,it;if(k==='ArrowDown'||k==='Enter'||k===' '){e.preventDefault();open();it=list();if(it.length)it[0].focus();}else if(k==='ArrowUp'){e.preventDefault();open();it=list();if(it.length)it[it.length-1].focus();}else if(k==='Escape'){close(true);}else if(k==='Tab'&&isOpen()){e.preventDefault();open();it=list();if(it.length)it[0].focus();}});menu.addEventListener('keydown',function(e){var k=e.key,it=list(),i=it.indexOf(document.activeElement);if(k==='Escape'){e.preventDefault();close(true);}else if(k==='ArrowDown'){e.preventDefault();if(it.length)it[(i+1+it.length)%it.length].focus();}else if(k==='ArrowUp'){e.preventDefault();if(it.length)it[(i-1+it.length)%it.length].focus();}else if(k==='Home'){e.preventDefault();if(it.length)it[0].focus();}else if(k==='End'){e.preventDefault();if(it.length)it[it.length-1].focus();}else if(k==='Tab'&&!e.shiftKey&&i===it.length-1){close(false);}});document.addEventListener('keydown',function(e){if(e.key==='Escape'&&isOpen())close(true);});var dm=document.getElementById('th-dark-toggle');if(dm){function sync(){var on=document.body.classList.contains('dark-mode'),i=dm.querySelector('i'),t=dm.querySelector('.th-menu-text');if(i)i.className=on?'fas fa-sun':'fas fa-moon';if(t)t.textContent=on?'Light Mode':'Dark Mode';}sync();dm.addEventListener('click',function(){if(typeof toggleDarkMode==='function')toggleDarkMode();sync();});}});</script>
+    <script src="assets/js/ajax-interceptor.js?v=8"></script>
     <style>.ajax-busy{pointer-events:none;opacity:.7}.ajax-busy i{margin-right:4px}</style>
 </head>
 <body class="<?= !empty($_COOKIE['dark_mode']) ? 'dark-mode' : '' ?>">
@@ -213,7 +213,6 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
                     <div class="sidebar-divider"></div>
                     <?php if (hasPermission('delivery_history', 'view')): ?><a href="?page=delivery_history" class="sidebar-link sub<?= $page === 'delivery_history' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Reports</a><?php endif; ?>
                     <?php endif; ?>
-                    <?php if (hasPermission('settings', 'view')): ?><a href="?page=settings&tab=system" class="sidebar-link sub<?= $page === 'settings' && ($_GET['tab'] ?? '') === 'system' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Settings</a><?php endif; ?>
                 </div>
             </div>
             <?php endif; ?>
@@ -238,11 +237,10 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
                 </div>
             </div>
             <?php endif; ?>
-            <?php if (hasPermission('settings', 'view') || hasPermission('cms', 'view') || hasPermission('system_sync', 'view')): ?>
-            <div class="sidebar-group<?= in_array($page, ['settings','cms','system_sync']) ? ' open' : '' ?>">
-                <div class="sidebar-group-header" onclick="toggleGroup('set')"><i class="fas fa-cog"></i><span>Settings</span><i class="fas fa-chevron-right chevron"></i></div>
+            <?php if (hasPermission('cms', 'view') || hasPermission('system_sync', 'view')): ?>
+            <div class="sidebar-group<?= in_array($page, ['cms','system_sync']) ? ' open' : '' ?>">
+                <div class="sidebar-group-header" onclick="toggleGroup('set')"><i class="fas fa-cog"></i><span>Content &amp; Data</span><i class="fas fa-chevron-right chevron"></i></div>
                 <div class="sidebar-group-content" id="group-set">
-                    <?php if (hasPermission('settings', 'view')): ?><a href="?page=settings&tab=system" class="sidebar-link sub<?= $page === 'settings' && ($_GET['tab'] ?? '') === 'system' ? ' active' : '' ?>"><i class="fas fa-circle"></i>System Settings</a><?php endif; ?>
                     <?php if (hasPermission('cms', 'view')): ?><a href="?page=cms" class="sidebar-link sub<?= $page === 'cms' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Content Management</a><?php endif; ?>
                     <?php if (hasPermission('system_sync', 'view')): ?><a href="?page=system_sync" class="sidebar-link sub<?= $page === 'system_sync' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Data Sync</a><?php endif; ?>
                 </div>
@@ -316,15 +314,6 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
                     <a href="?page=ledger" class="sidebar-link sub<?= $page === 'ledger' ? ' active' : '' ?>"><i class="fas fa-circle"></i>My Ledger</a>
                 </div>
             </div>
-            <a href="?page=messages" class="sidebar-link<?= $page === 'messages' ? ' active' : '' ?>"><i class="fas fa-envelope"></i><span>Messages</span></a>
-            <div class="sidebar-group<?= in_array($page, ['customer_settings','change_password']) ? ' open' : '' ?>">
-                <div class="sidebar-group-header" onclick="toggleGroup('acc')"><i class="fas fa-user-circle"></i><span>Account</span><i class="fas fa-chevron-right chevron"></i></div>
-                <div class="sidebar-group-content" id="group-acc">
-                    <a href="?page=customer_settings" class="sidebar-link sub<?= $page === 'customer_settings' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Profile Settings</a>
-                    <a href="?page=change_password" class="sidebar-link sub<?= $page === 'change_password' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Change Password</a>
-                </div>
-            </div>
-            <a href="?page=help_center" class="sidebar-link<?= $page === 'help_center' ? ' active' : '' ?>"><i class="fas fa-question-circle"></i><span>Help Center</span></a>
 
         <?php elseif (isDeliveryStaff()): ?>
             <div class="sidebar-group<?= in_array($page, ['delivery_dashboard','delivery_staff','delivery_assign','delivery_tracking','delivery_confirm','delivery_history','delivery_returns','assign_deliveries','delivery_confirmation']) ? ' open' : '' ?>">
@@ -409,31 +398,89 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
         </div>
         <div class="th-right">
             <?php if (!isDeliveryStaff()): ?><span class="scanner-indicator"><i class="fas fa-barcode"></i> Scanner</span><?php endif; ?>
-            <?php if (isAdmin()): ?>
-            <a href="?page=admin_messages" style="position:relative;background:none;border:none;width:34px;height:34px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;color:var(--neutral-600);font-size:1rem;cursor:pointer;text-decoration:none;transition:all 0.15s" title="Customer Messages" onmouseover="this.style.background='var(--neutral-200)'" onmouseout="this.style.background='none'"><i class="fas fa-envelope"></i><?php if ($unreadMsgCount > 0): ?><span style="position:absolute;top:-2px;right:-2px;background:var(--red-600);color:#fff;border-radius:50%;font-size:0.6rem;padding:2px 5px;font-weight:700;line-height:1"><?= $unreadMsgCount ?></span><?php endif; ?></a>
-            <a href="?page=finance_dashboard" style="position:relative;background:none;border:none;width:34px;height:34px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;color:var(--neutral-600);font-size:1rem;cursor:pointer;text-decoration:none;transition:all 0.15s" title="Finance Notifications" onmouseover="this.style.background='var(--neutral-200)'" onmouseout="this.style.background='none'"><i class="fas fa-bell"></i><?php if ($finUnread > 0): ?><span style="position:absolute;top:-2px;right:-2px;background:var(--red-600);color:#fff;border-radius:50%;font-size:0.6rem;padding:2px 5px;font-weight:700;line-height:1"><?= $finUnread ?></span><?php endif; ?></a>
-            <?php endif; ?>
-            <span class="th-user"><i class="fas fa-user-circle"></i> <?= htmlspecialchars($user['full_name'] ?? $user['username'] ?? 'User') ?></span>
-            <div class="th-dropdown" style="position:relative">
-                <button class="th-btn" title="Help" style="background:var(--neutral-300);border:none;border-radius:50%;width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;color:var(--neutral-700);font-size:1rem;font-weight:700;cursor:pointer;flex-shrink:0;transition:all 0.15s;font-family:inherit" onclick="toggleHelpMenu(event)">?</button>
-                <div id="help-menu" style="display:none;position:absolute;right:0;top:100%;margin-top:6px;background:#fff;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.15);min-width:200px;z-index:9999;overflow:hidden">
-                    <a href="?page=info&slug=company-services" style="display:flex;align-items:center;gap:10px;padding:12px 16px;color:var(--neutral-700);text-decoration:none;font-size:0.9rem;transition:background 0.12s" onmouseover="this.style.background='var(--neutral-100)'" onmouseout="this.style.background=''"><i class="fas fa-book" style="width:18px;text-align:center;color:var(--brown-600)"></i> User Guide</a>
-                    <a href="#" style="display:flex;align-items:center;gap:10px;padding:12px 16px;color:var(--neutral-400);text-decoration:none;font-size:0.9rem;cursor:not-allowed" onclick="event.preventDefault()"><i class="fas fa-video" style="width:18px;text-align:center;color:var(--neutral-400)"></i> Video Tutorials <span style="font-size:0.65rem;color:var(--neutral-400);margin-left:auto">Soon</span></a>
-                    <a href="?page=info&slug=frequently-asked-questions" style="display:flex;align-items:center;gap:10px;padding:12px 16px;color:var(--neutral-700);text-decoration:none;font-size:0.9rem;transition:background 0.12s;border-top:1px solid var(--neutral-200)" onmouseover="this.style.background='var(--neutral-100)'" onmouseout="this.style.background=''"><i class="fas fa-question-circle" style="width:18px;text-align:center;color:var(--brown-600)"></i> FAQ</a>
-                    <a href="?page=info&slug=contact-information" style="display:flex;align-items:center;gap:10px;padding:12px 16px;color:var(--neutral-700);text-decoration:none;font-size:0.9rem;transition:background 0.12s;border-top:1px solid var(--neutral-200)" onmouseover="this.style.background='var(--neutral-100)'" onmouseout="this.style.background=''"><i class="fas fa-envelope" style="width:18px;text-align:center;color:var(--brown-600)"></i> Contact Support</a>
-                    <a href="?page=info&slug=privacy-policy" style="display:flex;align-items:center;gap:10px;padding:12px 16px;color:var(--neutral-700);text-decoration:none;font-size:0.9rem;transition:background 0.12s;border-top:1px solid var(--neutral-200)" onmouseover="this.style.background='var(--neutral-100)'" onmouseout="this.style.background=''"><i class="fas fa-shield-alt" style="width:18px;text-align:center;color:var(--brown-600)"></i> Privacy Policy</a>
-                    <a href="?page=info&slug=terms-and-conditions" style="display:flex;align-items:center;gap:10px;padding:12px 16px;color:var(--neutral-700);text-decoration:none;font-size:0.9rem;transition:background 0.12s;border-top:1px solid var(--neutral-200)" onmouseover="this.style.background='var(--neutral-100)'" onmouseout="this.style.background=''"><i class="fas fa-file-contract" style="width:18px;text-align:center;color:var(--brown-600)"></i> Terms &amp; Conditions</a>
+            <?php
+            $profileRoleLabel = match ((string) ($user['role'] ?? '')) {
+                'admin' => 'Super Admin',
+                'manager' => 'Manager',
+                'finance' => 'Finance Officer',
+                'delivery' => 'Delivery Staff',
+                'store_manager' => 'Store Manager',
+                'customer' => 'Customer',
+                'salesperson' => 'Salesperson',
+                default => ucfirst((string) ($user['role'] ?: 'User')),
+            };
+            $profileName = (string) ($user['full_name'] ?? $user['username'] ?? 'User');
+            $mi = function (string $href, string $icon, string $label, int $badge = 0, bool $danger = false): string {
+                return '<a class="th-menu-item' . ($danger ? ' is-danger' : '') . '" role="menuitem" href="' . htmlspecialchars($href) . '">'
+                    . '<i class="fas ' . $icon . '" aria-hidden="true"></i>'
+                    . '<span class="th-menu-text">' . $label . '</span>'
+                    . ($badge > 0 ? '<span class="th-menu-badge">' . $badge . '</span>' : '')
+                    . '</a>';
+            };
+            $msgHref = isCustomer() ? '?page=messages' : '?page=admin_messages';
+            $helpHref = isCustomer() ? '?page=help_center' : '?page=info&slug=company-services';
+
+            $gProfile = (isCustomer() ? $mi('?page=customer_settings', 'fa-user', 'My Profile') : '')
+                . $mi('?page=change_password', 'fa-key', 'Account');
+
+            $gComms = (isCustomer() || hasPermission('users', 'view') ? $mi($msgHref, 'fa-envelope', 'Messages', $unreadMsgCount) : '')
+                . (hasPermission('finance_dashboard', 'view') ? $mi('?page=finance_dashboard', 'fa-bell', 'Notifications', $finUnread) : '');
+
+            $gSupport = $mi($helpHref, 'fa-question-circle', 'Help Center')
+                . (isCustomer() ? '' :
+                    $mi('?page=info&slug=frequently-asked-questions', 'fa-book', 'FAQ')
+                    . $mi('?page=info&slug=contact-information', 'fa-envelope', 'Contact Support')
+                    . $mi('?page=info&slug=privacy-policy', 'fa-shield-alt', 'Privacy Policy')
+                    . $mi('?page=info&slug=terms-and-conditions', 'fa-file-contract', 'Terms &amp; Conditions'));
+
+            $gSystem = (hasPermission('settings', 'view') ? $mi('?page=settings', 'fa-cog', 'Settings') : '')
+                . '<button type="button" class="th-menu-item" role="menuitem" id="th-dark-toggle"><i class="fas fa-moon" aria-hidden="true"></i><span class="th-menu-text">Dark Mode</span></button>';
+
+            $gSecurity = $mi('?page=logout', 'fa-sign-out-alt', 'Logout', 0, true);
+            ?>
+            <div class="th-profile">
+                <button type="button" class="th-profile-btn" id="th-profile-btn" title="Account menu" aria-haspopup="true" aria-expanded="false" aria-controls="th-profile-menu">
+                    <i class="fas fa-user-circle" aria-hidden="true"></i>
+                    <span class="th-profile-name"><?= htmlspecialchars($profileName) ?></span>
+                    <i class="fas fa-chevron-down th-profile-caret" aria-hidden="true"></i>
+                </button>
+                <div class="th-menu" id="th-profile-menu" role="menu" aria-labelledby="th-profile-btn" hidden>
+                    <div class="th-menu-head" role="presentation">
+                        <i class="fas fa-user-circle" aria-hidden="true"></i>
+                        <span class="th-menu-id">
+                            <strong><?= htmlspecialchars($profileName) ?></strong>
+                            <small><?= htmlspecialchars($profileRoleLabel) ?></small>
+                        </span>
+                    </div>
+
+                    <div class="th-menu-group" role="group" aria-label="Profile">
+                        <div class="th-menu-label">Profile</div>
+                        <?= $gProfile ?>
+                    </div>
+
+                    <?php if ($gComms !== ''): ?>
+                    <div class="th-menu-group" role="group" aria-label="Communication">
+                        <div class="th-menu-label">Communication</div>
+                        <?= $gComms ?>
+                    </div>
+                    <?php endif; ?>
+
+                    <div class="th-menu-group" role="group" aria-label="Support">
+                        <div class="th-menu-label">Support</div>
+                        <?= $gSupport ?>
+                    </div>
+
+                    <div class="th-menu-group" role="group" aria-label="System">
+                        <div class="th-menu-label">System</div>
+                        <?= $gSystem ?>
+                    </div>
+
+                    <div class="th-menu-group" role="group" aria-label="Security">
+                        <div class="th-menu-label">Security</div>
+                        <?= $gSecurity ?>
+                    </div>
                 </div>
             </div>
-            <div class="th-dropdown" style="position:relative">
-                <button class="th-btn" title="Settings" style="background:var(--brown-600);border:none;border-radius:50%;width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;color:#fff;font-size:1rem;cursor:pointer;flex-shrink:0;transition:all 0.15s" onclick="toggleSettingsMenu(event)"><i class="fas fa-cog"></i></button>
-                <div id="settings-menu" style="display:none;position:absolute;right:0;top:100%;margin-top:6px;background:#fff;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.15);min-width:180px;z-index:9999;overflow:hidden">
-                    <a href="?page=customer_settings" style="display:flex;align-items:center;gap:10px;padding:12px 16px;color:var(--neutral-700);text-decoration:none;font-size:0.9rem;transition:background 0.12s" onmouseover="this.style.background='var(--neutral-100)'" onmouseout="this.style.background=''"><i class="fas fa-user-circle" style="width:18px;text-align:center;color:var(--brown-600)"></i> Profile Settings</a>
-                    <a href="?page=change_password" style="display:flex;align-items:center;gap:10px;padding:12px 16px;color:var(--neutral-700);text-decoration:none;font-size:0.9rem;transition:background 0.12s;border-top:1px solid var(--neutral-200)" onmouseover="this.style.background='var(--neutral-100)'" onmouseout="this.style.background=''"><i class="fas fa-key" style="width:18px;text-align:center;color:var(--brown-600)"></i> Password Settings</a>
-                    <button onclick="toggleDarkMode();this.innerHTML=document.body.classList.contains('dark-mode')?'<i class=\'fas fa-sun\' style=\'width:18px;text-align:center;color:var(--brown-600)\'></i> Light Mode':'<i class=\'fas fa-moon\' style=\'width:18px;text-align:center;color:var(--brown-600)\'></i> Dark Mode';document.getElementById('settings-menu').style.display='none'" style="display:flex;align-items:center;gap:10px;padding:12px 16px;color:var(--neutral-700);font-size:0.9rem;width:100%;background:none;border:none;border-top:1px solid var(--neutral-200);cursor:pointer;font-family:inherit;transition:background 0.12s" onmouseover="this.style.background='var(--neutral-100)'" onmouseout="this.style.background=''"><i class="fas fa-moon" style="width:18px;text-align:center;color:var(--brown-600)"></i> Dark Mode</button>
-                </div>
-            </div>
-            <a href="?page=logout" class="th-btn th-logout" title="Logout"><i class="fas fa-sign-out-alt"></i></a>
         </div>
     </header>
     <main class="main-content">
