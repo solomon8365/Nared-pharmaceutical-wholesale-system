@@ -17,33 +17,33 @@ $base = "
     SELECT source, action, entity, description, user_name, created_at FROM (
         SELECT 'status' AS source, CONCAT(COALESCE(sh.from_status,''),' → ',COALESCE(sh.to_status,'')) AS action,
                CONCAT(sh.workflow,' #',sh.entity_id) AS entity, COALESCE(sh.notes,'') AS description,
-               COALESCE(u.username,'—') AS user_name, sh.created_at AS created_at
+               COALESCE(u.username COLLATE utf8mb4_general_ci,'—') AS user_name, sh.created_at AS created_at
         FROM status_history sh LEFT JOIN users u ON u.id = sh.changed_by
         UNION ALL
         SELECT 'payment', pl.action,
                CONCAT(IF(pl.customer_order_id IS NULL,'Invoice / account',CONCAT('Order #',pl.customer_order_id))),
                CONCAT(COALESCE(pl.payment_method,''),COALESCE(CONCAT(' · ',pl.transaction_ref),''),COALESCE(CONCAT(' · ',pl.notes),'')),
-               COALESCE(u.username,'—'), pl.created_at
+               COALESCE(u.username COLLATE utf8mb4_general_ci,'—'), pl.created_at
         FROM payment_log pl LEFT JOIN users u ON u.id = pl.performed_by
         UNION ALL
         SELECT 'delivery', dl.action, CONCAT('Order #',dl.order_id),
                CONCAT(COALESCE(dl.old_status,''),' → ',COALESCE(dl.new_status,''),COALESCE(CONCAT(' · ',dl.notes),'')),
-               COALESCE(u.username,'—'), dl.created_at
+               COALESCE(u.username COLLATE utf8mb4_general_ci,'—'), dl.created_at
         FROM delivery_logs dl LEFT JOIN users u ON u.id = dl.performed_by
         UNION ALL
         SELECT 'credit', c.action, CONCAT('Customer #',c.customer_id),
                CONCAT(COALESCE(c.old_value,''),' → ',COALESCE(c.new_value,'')),
-               COALESCE(u.username,'—'), c.created_at
+               COALESCE(u.username COLLATE utf8mb4_general_ci,'—'), c.created_at
         FROM credit_audit_log c LEFT JOIN users u ON u.id = c.user_id
         UNION ALL
         SELECT 'bank', b.action, CONCAT(b.entity_type,' #',COALESCE(b.entity_id,'')),
                CONCAT(COALESCE(b.old_value,''),' → ',COALESCE(b.new_value,'')),
-               COALESCE(NULLIF(b.username,''),'—'), b.created_at
+               COALESCE(NULLIF(b.username COLLATE utf8mb4_general_ci,''),'—'), b.created_at
         FROM bank_audit_log b
         UNION ALL
-        SELECT 'cms', c.action, CONCAT(COALESCE(c.entity_type,'page'),' #',COALESCE(c.entity_id,'')),
-               CONCAT(COALESCE(c.summary,''),COALESCE(CONCAT(' · ',c.details),'')),
-               COALESCE(u.username,'—'), c.created_at
+        SELECT 'cms', c.action, CONCAT('Page #', COALESCE(c.page_id, 0)),
+               COALESCE(c.details, ''),
+               COALESCE(u.username COLLATE utf8mb4_general_ci, '—'), c.created_at
         FROM cms_activity_log c LEFT JOIN users u ON u.id = c.user_id
     ) t
 ";

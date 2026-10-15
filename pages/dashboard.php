@@ -1,6 +1,12 @@
 <?php
 $pdo = getPDO();
 
+// The root Super Admin lands on the dedicated Super Admin control center.
+if (isSuperAdmin()) {
+    require_once __DIR__ . '/super_admin_dashboard.php';
+    return;
+}
+
 if (getUserRoleId() === 5) {
     require_once __DIR__ . '/store_dashboard.php';
     return;

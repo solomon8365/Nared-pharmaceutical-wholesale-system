@@ -42,6 +42,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $pdo->prepare('UPDATE product_batches SET quantity = quantity - :qty WHERE id = :id')
                             ->execute(['qty' => $deduct, 'id' => $batchId]);
                         recalc_product_stock($pdo, $productId);
+                    } elseif (has_batches($pdo, $productId)) {
+                        throw new RuntimeException('This product is batch-tracked — select a batch for the adjustment.');
                     } elseif ($currentStock < $deduct) {
                         throw new RuntimeException('Insufficient stock.');
                     } else {
@@ -50,9 +52,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 } else {
                     if ($batchId) {
+                        $bstmt = $pdo->prepare('SELECT product_id FROM product_batches WHERE id = :id FOR UPDATE');
+                        $bstmt->execute(['id' => $batchId]);
+                        $brow = $bstmt->fetch();
+                        if (!$brow || (int)$brow['product_id'] !== $productId) throw new RuntimeException('Batch not found or does not belong to this product.');
                         $pdo->prepare('UPDATE product_batches SET quantity = quantity + :qty WHERE id = :id')
                             ->execute(['qty' => $quantity, 'id' => $batchId]);
                         recalc_product_stock($pdo, $productId);
+                    } elseif (has_batches($pdo, $productId)) {
+                        throw new RuntimeException('This product is batch-tracked — select a batch for the adjustment.');
                     } else {
                         $pdo->prepare('UPDATE products SET stock_quantity = stock_quantity + :qty WHERE id = :id')
                             ->execute(['qty' => $quantity, 'id' => $productId]);

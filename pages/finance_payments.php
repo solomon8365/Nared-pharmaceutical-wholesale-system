@@ -9,14 +9,18 @@ ensureFinanceErpMigration(finGetDb());
 requirePermission('finance_payments', 'view');
 $pdo = finGetDb();
 ensureFulfillmentMigration($pdo);
+ensureCustomerPaymentSubmissionMigration($pdo);
 $user = currentUser();
 $uid = (int) $user['id'];
 $messages = [];
+$fpAllowedTabs = ['pending', 'customer', 'finalize', 'approved', 'rejected', 'history', 'make'];
+$fpExplicitTab = isset($_GET['tab']) ? (string) $_GET['tab'] : null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     require_csrf();
 
     if (isset($_POST['confirm_payment'])) {
+        requirePermission('finance_payments', 'confirm');
         $orderId = (int) ($_POST['order_id'] ?? 0);
         $notes = trim($_POST['payment_notes'] ?? '');
         $verifiedAmount = (float) ($_POST['verified_amount'] ?? 0);
@@ -30,6 +34,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (isset($_POST['reject_payment'])) {
+        requirePermission('finance_payments', 'confirm');
         $orderId = (int) ($_POST['order_id'] ?? 0);
         $reason = trim($_POST['rejection_reason'] ?? '');
         if ($orderId <= 0) {
@@ -62,6 +67,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (isset($_POST['verify_payment'])) {
+        requirePermission('finance_payments', 'confirm');
         $orderId = (int) ($_POST['order_id'] ?? 0);
         $verifiedAmount = (float) ($_POST['verified_amount'] ?? 0);
         $notes = trim($_POST['verification_notes'] ?? '');
@@ -85,6 +91,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (isset($_POST['make_payment'])) {
+        requirePermission('finance_payments', 'process');
         $invoiceId = (int) ($_POST['invoice_id'] ?? 0);
         $payAmount = (float) ($_POST['pay_amount'] ?? 0);
         $payMethod = trim($_POST['pay_method'] ?? 'cash');
@@ -124,6 +131,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
     if (isset($_POST['finalize_salesperson'])) {
+        requirePermission('finance_payments', 'process');
         $orderId = (int) ($_POST['order_id'] ?? 0);
         if ($orderId <= 0) {
             $messages[] = ['type' => 'error', 'text' => 'Invalid order.'];
@@ -133,6 +141,78 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $messages[] = ['type' => 'success', 'text' => 'Order #' . $orderId . ' finalized. Sale #' . (int) $res['sale_id'] . ' and invoice ' . htmlspecialchars($res['invoice_no']) . ' generated; stock deducted.'];
             } catch (ServiceException $e) {
                 $messages[] = ['type' => 'error', 'text' => $e->getMessage()];
+            }
+        }
+    }
+
+    /* ── Customer-submitted invoice payments (verify / reject) ── */
+    if (isset($_POST['verify_customer_payment'])) {
+        requirePermission('finance_payments', 'confirm');
+        $subId = (int) ($_POST['submission_id'] ?? 0);
+        $verifiedAmount = (float) ($_POST['verified_amount'] ?? 0);
+        $verNotes = trim($_POST['verification_notes'] ?? '');
+        $subStmt = $pdo->prepare("SELECT s.*, i.invoice_no, i.customer_order_id FROM customer_payment_submissions s JOIN invoices i ON s.invoice_id = i.id WHERE s.id = :id AND s.status = 'pending' LIMIT 1");
+        $subStmt->execute(['id' => $subId]);
+        $sub = $subStmt->fetch();
+        if (!$sub) {
+            $messages[] = ['type' => 'error', 'text' => 'Submission not found or already reviewed.'];
+        } elseif ($verifiedAmount <= 0) {
+            $messages[] = ['type' => 'error', 'text' => 'Verified amount must be greater than zero.'];
+        } else {
+            WorkflowEngine::ensureStatusHistoryTable($pdo);
+            $pdo->beginTransaction();
+            try {
+                $ok = recordInvoicePayment($pdo, (int) $sub['invoice_id'], $verifiedAmount, $sub['payment_method'], $sub['reference_no'], $sub['receipt_path'], $verNotes !== '' ? $verNotes : 'Verified against customer evidence', $uid);
+                if (!$ok) {
+                    throw new RuntimeException('The invoice could not be updated — it may already be settled.');
+                }
+                // Identify the ledger row we just created (lastInsertId is unreliable after sync UPDATEs).
+                $ipStmt = $pdo->prepare('SELECT id FROM invoice_payments WHERE invoice_id = :iid AND customer_id = :cid ORDER BY id DESC LIMIT 1');
+                $ipStmt->execute(['iid' => (int) $sub['invoice_id'], 'cid' => (int) $sub['customer_id']]);
+                $ipId = (int) $ipStmt->fetchColumn();
+                $pdo->prepare("UPDATE customer_payment_submissions SET status = 'verified', reviewed_by = :u, reviewed_at = NOW(), invoice_payment_id = :ip, rejection_reason = NULL WHERE id = :id AND status = 'pending'")
+                    ->execute(['u' => $uid, 'ip' => $ipId, 'id' => $subId]);
+                $orderId = (int) ($sub['customer_order_id'] ?? 0);
+                logPaymentAction($pdo, $orderId, (int) $sub['customer_id'], 'payment_verified', $verifiedAmount, $sub['payment_method'], $sub['reference_no'], $uid, $verNotes !== '' ? $verNotes : 'Customer payment verified');
+                if ($orderId > 0) {
+                    createOrderNotification($pdo, $orderId, (int) $sub['customer_id'], 'Payment Verified', 'Your payment of ' . finFmt($verifiedAmount) . ' for invoice ' . $sub['invoice_no'] . ' has been verified by Finance.', 'success');
+                } else {
+                    NotificationService::credit($pdo, (int) $sub['customer_id'], 'success', 'Payment Verified', 'Your payment of ' . finFmt($verifiedAmount) . ' for invoice ' . $sub['invoice_no'] . ' has been verified by Finance.');
+                }
+                $pdo->commit();
+                $messages[] = ['type' => 'success', 'text' => 'Verified ' . finFmt($verifiedAmount) . ' for invoice ' . htmlspecialchars($sub['invoice_no']) . '.'];
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                $messages[] = ['type' => 'error', 'text' => ErpService::friendlyError($e)];
+            }
+        }
+    }
+
+    if (isset($_POST['reject_customer_payment'])) {
+        requirePermission('finance_payments', 'unconfirm');
+        $subId = (int) ($_POST['submission_id'] ?? 0);
+        $reason = trim($_POST['rejection_reason'] ?? '');
+        if ($subId <= 0) {
+            $messages[] = ['type' => 'error', 'text' => 'Invalid submission.'];
+        } elseif ($reason === '') {
+            $messages[] = ['type' => 'error', 'text' => 'Please provide a reason for rejecting this payment.'];
+        } else {
+            $subStmt = $pdo->prepare("SELECT s.*, i.invoice_no, i.customer_order_id FROM customer_payment_submissions s JOIN invoices i ON s.invoice_id = i.id WHERE s.id = :id AND s.status = 'pending' LIMIT 1");
+            $subStmt->execute(['id' => $subId]);
+            $sub = $subStmt->fetch();
+            if (!$sub) {
+                $messages[] = ['type' => 'error', 'text' => 'Submission not found or already reviewed.'];
+            } else {
+                $pdo->prepare("UPDATE customer_payment_submissions SET status = 'rejected', reviewed_by = :u, reviewed_at = NOW(), rejection_reason = :r WHERE id = :id AND status = 'pending'")
+                    ->execute(['u' => $uid, 'r' => $reason, 'id' => $subId]);
+                $orderId = (int) ($sub['customer_order_id'] ?? 0);
+                logPaymentAction($pdo, $orderId, (int) $sub['customer_id'], 'payment_rejected', (float) $sub['amount'], $sub['payment_method'], $sub['reference_no'], $uid, $reason);
+                if ($orderId > 0) {
+                    createOrderNotification($pdo, $orderId, (int) $sub['customer_id'], 'Payment Rejected', 'Your payment for invoice ' . $sub['invoice_no'] . ' was rejected. Reason: ' . $reason . '. Please resubmit with correct details.', 'error');
+                } else {
+                    NotificationService::credit($pdo, (int) $sub['customer_id'], 'error', 'Payment Rejected', 'Your payment for invoice ' . $sub['invoice_no'] . ' was rejected. Reason: ' . $reason);
+                }
+                $messages[] = ['type' => 'success', 'text' => 'Submission rejected. Customer has been notified.'];
             }
         }
     }
@@ -180,6 +260,24 @@ try {
     $unpaidInvoices = $uiStmt->fetchAll();
 } catch (Exception $e) {
     $unpaidInvoices = [];
+}
+
+$pendingSubmissions = [];
+try {
+    $psStmt = $pdo->prepare("SELECT s.*, c.name AS customer_name, c.phone AS customer_phone, i.invoice_no, i.customer_order_id, i.outstanding_balance, i.total_amount AS inv_total, i.payment_status AS inv_status FROM customer_payment_submissions s LEFT JOIN customers c ON s.customer_id = c.id LEFT JOIN invoices i ON s.invoice_id = i.id WHERE s.status = 'pending' ORDER BY s.created_at ASC");
+    $psStmt->execute();
+    $pendingSubmissions = $psStmt->fetchAll();
+} catch (Exception $e) {
+    $pendingSubmissions = [];
+}
+
+// Landing tab: default to the Customer Payments tab whenever submissions await
+// verification (an explicit ?tab= deep link always wins). This lets Finance staff
+// land directly on the approvals they need to action.
+if ($fpExplicitTab !== null && in_array($fpExplicitTab, $fpAllowedTabs, true)) {
+    $fpTab = $fpExplicitTab;
+} else {
+    $fpTab = !empty($pendingSubmissions) ? 'customer' : 'pending';
 }
 
 $itemsByOrder = [];
@@ -310,17 +408,25 @@ function fpMethodBadge(string $method): string {
 
     <div class="fin-card">
         <div class="fin-tabs" id="fp-tabs">
-            <button class="fin-tab active" onclick="finSwitchTab(this,'fp-panel-pending')"><i class="fas fa-clock"></i> Pending <span class="fin-badge fin-badge-orange" style="margin-left:4px"><?= $pendingCount ?></span></button>
-            <button class="fin-tab" onclick="finSwitchTab(this,'fp-panel-finalize')"><i class="fas fa-clipboard-check"></i> Finalize Salesperson <span class="fin-badge fin-badge-blue" style="margin-left:4px"><?= count($salespersonFinalize) ?></span></button>
-            <button class="fin-tab" onclick="finSwitchTab(this,'fp-panel-approved')"><i class="fas fa-check-circle"></i> Approved <span class="fin-badge fin-badge-green" style="margin-left:4px"><?= count($approvedOrders) ?></span></button>
-            <button class="fin-tab" onclick="finSwitchTab(this,'fp-panel-rejected')"><i class="fas fa-times-circle"></i> Rejected <span class="fin-badge fin-badge-red" style="margin-left:4px"><?= count($rejectedOrders) ?></span></button>
-<button class="fin-tab" onclick="finSwitchTab(this,'fp-panel-history')"><i class="fas fa-history"></i> Payment History</button>
+            <button class="fin-tab<?= $fpTab === 'pending' ? ' active' : '' ?>" onclick="finSwitchTab(this,'fp-panel-pending')"><i class="fas fa-clock"></i> Pending <span class="fin-badge fin-badge-orange" style="margin-left:4px"><?= $pendingCount ?></span></button>
+            <button class="fin-tab<?= $fpTab === 'customer' ? ' active' : '' ?>" onclick="finSwitchTab(this,'fp-panel-customer')"><i class="fas fa-user-check"></i> Customer Payments <?php if (count($pendingSubmissions) > 0): ?><span class="fin-badge fin-badge-purple" style="margin-left:4px"><?= count($pendingSubmissions) ?></span><?php endif; ?></button>
+            <button class="fin-tab<?= $fpTab === 'finalize' ? ' active' : '' ?>" onclick="finSwitchTab(this,'fp-panel-finalize')"><i class="fas fa-clipboard-check"></i> Finalize Salesperson <span class="fin-badge fin-badge-blue" style="margin-left:4px"><?= count($salespersonFinalize) ?></span></button>
+            <button class="fin-tab<?= $fpTab === 'approved' ? ' active' : '' ?>" onclick="finSwitchTab(this,'fp-panel-approved')"><i class="fas fa-check-circle"></i> Approved <span class="fin-badge fin-badge-green" style="margin-left:4px"><?= count($approvedOrders) ?></span></button>
+            <button class="fin-tab<?= $fpTab === 'rejected' ? ' active' : '' ?>" onclick="finSwitchTab(this,'fp-panel-rejected')"><i class="fas fa-times-circle"></i> Rejected <span class="fin-badge fin-badge-red" style="margin-left:4px"><?= count($rejectedOrders) ?></span></button>
+<button class="fin-tab<?= $fpTab === 'history' ? ' active' : '' ?>" onclick="finSwitchTab(this,'fp-panel-history')"><i class="fas fa-history"></i> Payment History</button>
 <?php if (hasPermission('finance_payments', 'process')): ?>
-<button class="fin-tab" onclick="finSwitchTab(this,'fp-panel-make')"><i class="fas fa-plus-circle"></i> Make Payment</button>
+<button class="fin-tab<?= $fpTab === 'make' ? ' active' : '' ?>" onclick="finSwitchTab(this,'fp-panel-make')"><i class="fas fa-plus-circle"></i> Make Payment</button>
 <?php endif; ?>
         </div>
 
-        <div class="fin-panel active" id="fp-panel-pending">
+        <div class="fin-panel<?= $fpTab === 'pending' ? ' active' : '' ?>" id="fp-panel-pending">
+            <?php if (!empty($pendingSubmissions)): ?>
+            <a href="?page=finance_payments&amp;tab=customer" style="display:flex;align-items:center;gap:10px;padding:12px 16px;margin-bottom:16px;background:#f5f3ff;border:1px solid #c7d2fe;border-left:5px solid #7c3aed;border-radius:10px;text-decoration:none;color:#4c1d95;font-weight:700;font-size:.88rem">
+                <i class="fas fa-user-check" style="color:#7c3aed;font-size:1.1rem"></i>
+                <span><?= (int) count($pendingSubmissions) ?> customer payment<?= count($pendingSubmissions) === 1 ? '' : 's' ?> awaiting verification (<?= htmlspecialchars(currency_sym()) ?> <?= number_format((float) array_sum(array_column($pendingSubmissions, 'amount')), 2) ?>)</span>
+                <i class="fas fa-arrow-right" style="margin-left:auto"></i>
+            </a>
+            <?php endif; ?>
             <?php if (empty($pendingOrders)): ?>
                 <div class="fin-empty"><i class="fas fa-check-circle" style="color:var(--fin-green)"></i><div>All caught up! No pending payments to review.</div></div>
             <?php endif; ?>
@@ -499,7 +605,98 @@ function fpMethodBadge(string $method): string {
             <?php endforeach; ?>
         </div>
 
-        <div class="fin-panel" id="fp-panel-finalize">
+        <div class="fin-panel<?= $fpTab === 'customer' ? ' active' : '' ?>" id="fp-panel-customer">
+            <?php if (empty($pendingSubmissions)): ?>
+                <div class="fin-empty"><i class="fas fa-user-check" style="color:var(--fin-green)"></i><div>No customer payments awaiting verification.</div></div>
+            <?php endif; ?>
+            <?php foreach ($pendingSubmissions as $sub): $sid = (int) $sub['id']; ?>
+                <div class="fp-order-card" style="border-left-color:var(--fin-purple)">
+                    <div class="fp-order-head">
+                        <div>
+                            <div class="fp-order-id">Submission #<?= $sid ?> <span class="fin-badge fin-badge-purple">Awaiting Verification</span></div>
+                            <div class="fp-order-customer"><?= htmlspecialchars($sub['customer_name'] ?? 'Unknown Customer') ?><?= $sub['customer_phone'] ? ' · ' . htmlspecialchars($sub['customer_phone']) : '' ?></div>
+                        </div>
+                        <div class="fp-order-date">
+                            <div>Invoice: <?= $sub['invoice_no'] ? htmlspecialchars($sub['invoice_no']) : '—' ?></div>
+                            <div>Submitted: <?= date('M d, Y H:i', strtotime($sub['created_at'])) ?></div>
+                        </div>
+                    </div>
+
+                    <div class="fp-detail-grid">
+                        <div class="fp-detail-item"><span class="lbl">Claimed Amount</span><span class="val big"><?= finFmt((float) $sub['amount']) ?></span></div>
+                        <div class="fp-detail-item"><span class="lbl">Method</span><span class="val"><?= fpMethodBadge($sub['payment_method'] ?? '') ?></span></div>
+                        <div class="fp-detail-item"><span class="lbl">Order</span><span class="val"><?= $sub['customer_order_id'] ? '#' . (int) $sub['customer_order_id'] : '—' ?></span></div>
+                        <div class="fp-detail-item"><span class="lbl">Invoice Outstanding</span><span class="val"><?= $sub['outstanding_balance'] !== null ? finFmt((float) $sub['outstanding_balance']) : '—' ?></span></div>
+                        <div class="fp-detail-item"><span class="lbl">Transaction Ref</span><span class="val"><?= $sub['reference_no'] ? htmlspecialchars($sub['reference_no']) : '—' ?></span></div>
+                        <div class="fp-detail-item"><span class="lbl">Invoice Status</span><span class="val"><?= $sub['inv_status'] ? ucfirst($sub['inv_status']) : '—' ?></span></div>
+                    </div>
+
+                    <?php if (!empty($sub['notes'])): ?>
+                        <div class="fp-notes-box"><strong>Customer notes:</strong> <?= nl2br(htmlspecialchars($sub['notes'])) ?></div>
+                    <?php endif; ?>
+
+                    <?php if (!empty($sub['receipt_path'])): ?>
+                        <?php $isImg = preg_match('/\.(jpe?g|png|gif|webp)$/i', (string) $sub['receipt_path']); ?>
+                        <?php if ($isImg): ?>
+                            <div class="fp-receipt-wrap">
+                                <span class="fp-receipt-link" onclick="fpToggleReceipt(this)"><i class="fas fa-image"></i> View Payment Evidence</span>
+                                <img src="<?= htmlspecialchars($sub['receipt_path']) ?>" class="fp-receipt-img" alt="Payment evidence">
+                            </div>
+                        <?php endif; ?>
+                        <div style="font-size:.78rem;margin:4px 0 8px"><a href="<?= htmlspecialchars($sub['receipt_path']) ?>" target="_blank" style="color:var(--fin-blue);font-weight:600"><i class="fas fa-paperclip"></i> Open uploaded evidence</a></div>
+                    <?php else: ?>
+                        <div class="fp-notes-box" style="background:#fffbeb;border-color:#fde68a;color:#92400e"><strong><i class="fas fa-triangle-exclamation"></i> No evidence attached.</strong> Verify carefully before approving.</div>
+                    <?php endif; ?>
+
+                    <div class="fp-actions">
+                        <?php if (hasPermission('finance_payments', 'confirm')): ?>
+                        <form method="post" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap" onsubmit="return confirm('Verify this customer payment and post it to the invoice ledger?')">
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="verify_customer_payment" value="1">
+                            <input type="hidden" name="submission_id" value="<?= $sid ?>">
+                            <div>
+                                <label style="font-size:.72rem;color:var(--fin-gray);font-weight:600;display:block;margin-bottom:3px">Verified Amount</label>
+                                <input type="number" name="verified_amount" step="0.01" min="0.01"
+                                       value="<?= htmlspecialchars(number_format((float) $sub['amount'], 2, '.', '')) ?>"
+                                       style="width:150px;min-width:120px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:.82rem">
+                            </div>
+                            <div>
+                                <label style="font-size:.72rem;color:var(--fin-gray);font-weight:600;display:block;margin-bottom:3px">Verification Notes</label>
+                                <input type="text" name="verification_notes" placeholder="e.g. Matches bank statement" style="width:210px;min-width:150px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:.82rem">
+                            </div>
+                            <button type="submit" class="fin-btn fin-btn-green"><i class="fas fa-check"></i> Verify &amp; Post</button>
+                        </form>
+                        <?php endif; ?>
+                        <?php if ($sub['invoice_no']): ?>
+                            <a href="?page=invoice&id=<?= (int) $sub['invoice_id'] ?>" target="_blank" class="fin-btn fin-btn-outline fin-btn-sm"><i class="fas fa-file-invoice"></i> Invoice</a>
+                        <?php endif; ?>
+                        <?php if (hasPermission('finance_payments', 'unconfirm')): ?>
+                        <button type="button" class="fin-btn fin-btn-red fin-btn-sm" onclick="fpToggleReject(<?= $sid ?>)"><i class="fas fa-times"></i> Reject</button>
+                        <?php endif; ?>
+                    </div>
+
+                    <?php if (hasPermission('finance_payments', 'unconfirm')): ?>
+                    <div class="fp-reject-form" id="reject-<?= $sid ?>">
+                        <form method="post" onsubmit="return confirm('Reject this customer payment? The customer will be notified.')">
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="reject_customer_payment" value="1">
+                            <input type="hidden" name="submission_id" value="<?= $sid ?>">
+                            <div style="margin-bottom:10px">
+                                <label style="font-size:.82rem;font-weight:700;color:#991b1b;display:block;margin-bottom:4px"><i class="fas fa-exclamation-triangle"></i> Rejection Reason *</label>
+                                <textarea name="rejection_reason" rows="2" required placeholder="Explain what is wrong or what the customer must correct…" style="width:100%;padding:8px 10px;border:1px solid #fecaca;border-radius:8px;font-size:.82rem;font-family:inherit"></textarea>
+                            </div>
+                            <div style="display:flex;gap:8px">
+                                <button type="submit" class="fin-btn fin-btn-red"><i class="fas fa-times"></i> Confirm Rejection</button>
+                                <button type="button" class="fin-btn fin-btn-outline" onclick="fpToggleReject(<?= $sid ?>)">Cancel</button>
+                            </div>
+                        </form>
+                    </div>
+                    <?php endif; ?>
+                </div>
+            <?php endforeach; ?>
+        </div>
+
+        <div class="fin-panel<?= $fpTab === 'finalize' ? ' active' : '' ?>" id="fp-panel-finalize">
             <?php if (empty($salespersonFinalize)): ?>
                 <div class="fin-empty"><i class="fas fa-check-circle" style="color:var(--fin-green)"></i><div>No salesperson orders awaiting Finance finalization.</div></div>
             <?php endif; ?>
@@ -569,7 +766,7 @@ function fpMethodBadge(string $method): string {
             <?php endforeach; ?>
         </div>
 
-        <div class="fin-panel" id="fp-panel-approved">
+        <div class="fin-panel<?= $fpTab === 'approved' ? ' active' : '' ?>" id="fp-panel-approved">
             <?php if (empty($approvedOrders)): ?>
                 <div class="fin-empty"><i class="fas fa-inbox"></i><div>No confirmed payments yet.</div></div>
             <?php else: ?>
@@ -612,7 +809,7 @@ function fpMethodBadge(string $method): string {
             <?php endif; ?>
         </div>
 
-        <div class="fin-panel" id="fp-panel-rejected">
+        <div class="fin-panel<?= $fpTab === 'rejected' ? ' active' : '' ?>" id="fp-panel-rejected">
             <?php if (empty($rejectedOrders)): ?>
                 <div class="fin-empty"><i class="fas fa-check-circle" style="color:var(--fin-green)"></i><div>No rejected payments.</div></div>
             <?php else: ?>
@@ -676,7 +873,7 @@ function fpMethodBadge(string $method): string {
             <?php endif; ?>
         </div>
 
-        <div class="fin-panel" id="fp-panel-history">
+        <div class="fin-panel<?= $fpTab === 'history' ? ' active' : '' ?>" id="fp-panel-history">
             <div class="fin-card" style="margin-bottom:16px;padding:16px">
                 <h2 style="margin-bottom:12px"><i class="fas fa-list" style="color:var(--fin-blue)"></i> Recent Payment Activity</h2>
                 <?php if (empty($paymentLogs)): ?>
@@ -729,7 +926,7 @@ function fpMethodBadge(string $method): string {
         </div>
 
         <?php if (hasPermission('finance_payments', 'process')): ?>
-        <div class="fin-panel" id="fp-panel-make">
+        <div class="fin-panel<?= $fpTab === 'make' ? ' active' : '' ?>" id="fp-panel-make">
             <div class="fin-card" style="padding:24px">
                 <h2><i class="fas fa-plus-circle" style="color:var(--fin-green)"></i> Record a Payment Against Invoice</h2>
                 <p style="font-size:.82rem;color:var(--fin-gray);margin-bottom:20px">Manually record a payment received for an outstanding invoice. This will update the invoice ledger automatically.</p>

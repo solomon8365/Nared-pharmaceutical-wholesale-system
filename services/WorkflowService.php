@@ -245,12 +245,91 @@ class WorkflowService
 
     public static function rejectOrder(PDO $pdo, int $orderId, int $uid, string $note = ''): void
     {
+        // Guard: an approved order has already had its stock deducted and a
+        // sale + invoice generated, so simply rejecting it would leak stock.
+        // Such orders must go through the cancellation/refund flow instead.
+        $chk = $pdo->prepare('SELECT status FROM customer_orders WHERE id = :id');
+        $chk->execute(['id' => $orderId]);
+        if ($chk->fetchColumn() === 'approved') {
+            throw new ServiceException('Approved orders cannot be rejected. Use the cancellation and refund flow instead.');
+        }
         $result = static::transition($pdo, 'order', $orderId, 'rejected', [
             'extra' => ['admin_note' => $note !== '' ? $note : null, 'processed_at' => date('Y-m-d H:i:s')],
             'changed_by' => $uid,
         ]);
         if (!$result['success']) {
             throw new ServiceException($result['error']);
+        }
+        static::notifyCustomerOrder($pdo, $orderId, 'Order Rejected',
+            'Your order #' . $orderId . ' was rejected.' . ($note !== '' ? ' Reason: ' . $note : ''),
+            'error');
+    }
+
+    /**
+     * Best-effort customer notification for an order. Never throws, so a
+     * notification failure cannot roll back or break a workflow transition.
+     */
+    private static function notifyCustomerOrder(PDO $pdo, int $orderId, string $title, string $message, string $type = 'info'): void
+    {
+        try {
+            $stmt = $pdo->prepare('SELECT customer_id FROM customer_orders WHERE id = :id');
+            $stmt->execute(['id' => $orderId]);
+            $cid = (int) $stmt->fetchColumn();
+            if ($cid > 0) {
+                NotificationService::order($pdo, $orderId, $cid, $title, $message, $type);
+            }
+        } catch (Throwable $e) {
+            // Swallow: notifications are advisory.
+        }
+    }
+
+    /**
+     * Undo the stock deduction and generated invoice for an already-approved
+     * order. Runs inside the caller's transaction (does not begin/commit).
+     */
+    private static function reverseFinalizedOrder(PDO $pdo, int $orderId, int $uid, string $reason): void
+    {
+        $stmt = $pdo->prepare('SELECT sale_id FROM customer_orders WHERE id = :id');
+        $stmt->execute(['id' => $orderId]);
+        $saleId = (int) ($stmt->fetchColumn() ?: 0);
+        if ($saleId <= 0) {
+            return; // nothing was finalized for this order
+        }
+
+        require_once __DIR__ . '/../includes/stock_helper.php';
+        $items = $pdo->prepare('SELECT product_id, quantity FROM sale_items WHERE sale_id = :sid');
+        $items->execute(['sid' => $saleId]);
+        foreach ($items->fetchAll() as $it) {
+            $pid = (int) $it['product_id'];
+            $qty = (int) $it['quantity'];
+            if ($pid <= 0 || $qty <= 0) {
+                continue;
+            }
+            if (has_batches($pdo, $pid)) {
+                // Return the goods to the batch FEFO would have taken them from.
+                $b = $pdo->prepare("SELECT id FROM product_batches WHERE product_id = :pid ORDER BY (status = 'active') DESC, expiry_date ASC, id ASC LIMIT 1");
+                $b->execute(['pid' => $pid]);
+                $bid = (int) $b->fetchColumn();
+                if ($bid > 0) {
+                    $pdo->prepare('UPDATE product_batches SET quantity = quantity + :q WHERE id = :id')->execute(['q' => $qty, 'id' => $bid]);
+                }
+                recalc_product_stock($pdo, $pid);
+            } else {
+                $pdo->prepare('UPDATE products SET stock_quantity = stock_quantity + :q WHERE id = :id')->execute(['q' => $qty, 'id' => $pid]);
+            }
+            log_stock_movement($pdo, $pid, $qty, 'Order cancelled - stock restored', 'customer_order', $orderId);
+        }
+
+        // Void the auto-generated invoice for this order (payment/refund history
+        // is preserved separately by the refunds module).
+        $pdo->prepare("UPDATE invoices SET status = 'cancelled' WHERE customer_order_id = :oid")->execute(['oid' => $orderId]);
+
+        // Re-sync the customer's credit usage now that the invoice is void.
+        $cidStmt = $pdo->prepare('SELECT customer_id FROM customer_orders WHERE id = :id');
+        $cidStmt->execute(['id' => $orderId]);
+        $cid = (int) $cidStmt->fetchColumn();
+        if ($cid > 0 && class_exists('CreditService')) {
+            CreditService::recalcUsed($pdo, $cid);
         }
     }
 
@@ -268,13 +347,33 @@ class WorkflowService
         if (!$co || $co['status'] !== 'approved' || !$co['payment_confirmed'] || ($co['delivery_status'] === 'delivered')) {
             throw new ServiceException('Order could not be cancelled. Must be approved, payment confirmed, and not yet delivered.');
         }
-        $result = static::transition($pdo, 'order', $orderId, 'rejected', [
-            'extra' => ['admin_note' => 'Cancelled - ' . $reason, 'processed_at' => date('Y-m-d H:i:s')],
-            'changed_by' => $uid,
-        ]);
-        if (!$result['success']) {
-            throw new ServiceException($result['error']);
+        // Extend invoices.status with 'cancelled' before opening the transaction
+        // (DDL would implicitly commit an open transaction).
+        require_once __DIR__ . '/../includes/auto_migrate.php';
+        if (function_exists('ensureCoreWorkflowTablesMigration')) {
+            ensureCoreWorkflowTablesMigration($pdo);
         }
+        $pdo->beginTransaction();
+        try {
+            $result = static::transition($pdo, 'order', $orderId, 'rejected', [
+                'extra' => ['admin_note' => 'Cancelled - ' . $reason, 'processed_at' => date('Y-m-d H:i:s')],
+                'changed_by' => $uid,
+                'skip_transaction' => true,
+            ]);
+            if (!$result['success']) {
+                throw new ServiceException($result['error']);
+            }
+            static::reverseFinalizedOrder($pdo, $orderId, $uid, $reason);
+            $pdo->commit();
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $e instanceof ServiceException ? $e : new ServiceException('Cancellation failed: ' . $e->getMessage());
+        }
+        static::notifyCustomerOrder($pdo, $orderId, 'Order Cancelled',
+            'Your order #' . $orderId . ' has been cancelled.' . ($reason !== '' ? ' Reason: ' . $reason : ''),
+            'warning');
     }
 
     /**

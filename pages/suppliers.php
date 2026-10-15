@@ -21,6 +21,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['record_payment']) &&
     $action = $_POST['_action'] ?? 'create';
 
     if ($action === 'delete') {
+        requirePermission('suppliers', 'delete');
         $deleteId = (int) ($_POST['delete_id'] ?? 0);
         if ($deleteId > 0) {
             try {
@@ -31,6 +32,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['record_payment']) &&
             }
         }
     } elseif ($action === 'update') {
+        requirePermission('suppliers', 'edit');
         $supplierId = (int) ($_POST['supplier_id'] ?? 0);
         $name = trim($_POST['name'] ?? '');
         $contact = trim($_POST['contact'] ?? '');
@@ -46,6 +48,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['record_payment']) &&
             $messages[] = ['type' => 'success', 'text' => 'Supplier updated successfully.'];
         }
     } else {
+        requirePermission('suppliers', 'create');
         $name = trim($_POST['name'] ?? '');
         $contact = trim($_POST['contact'] ?? '');
         $phone = trim($_POST['phone'] ?? '');
@@ -62,13 +65,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['record_payment']) &&
     }
 }
 
-// --- Outstanding balance per supplier ---
+// --- Outstanding balance per supplier (real supplier orders live in purchase_orders) ---
 $balStmt = $pdo->query("
     SELECT o.supplier_id,
            SUM(o.total_amount) AS total_ordered,
            COALESCE(SUM(sp.paid), 0) AS total_paid
-    FROM orders o
-    LEFT JOIN (SELECT order_id, SUM(amount_paid) AS paid FROM supplier_payments GROUP BY order_id) sp ON sp.order_id = o.id
+    FROM purchase_orders o
+    LEFT JOIN (SELECT order_id, SUM(base_amount) AS paid FROM supplier_payments GROUP BY order_id) sp ON sp.order_id = o.id
+    WHERE o.status <> 'cancelled'
     GROUP BY o.supplier_id");
 $supplierBalances = [];
 foreach ($balStmt->fetchAll() as $b) {
@@ -79,8 +83,9 @@ foreach ($balStmt->fetchAll() as $b) {
 $ordStmt = $pdo->query("
     SELECT o.id, o.order_date, o.total_amount, o.supplier_id,
            COALESCE(sp.paid, 0) AS paid
-    FROM orders o
-    LEFT JOIN (SELECT order_id, SUM(amount_paid) AS paid FROM supplier_payments GROUP BY order_id) sp ON sp.order_id = o.id
+    FROM purchase_orders o
+    LEFT JOIN (SELECT order_id, SUM(base_amount) AS paid FROM supplier_payments GROUP BY order_id) sp ON sp.order_id = o.id
+    WHERE o.status <> 'cancelled'
     ORDER BY o.supplier_id, o.order_date DESC");
 $supplierOrders = [];
 foreach ($ordStmt->fetchAll() as $o) {
@@ -110,10 +115,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['record_payment'])) {
     if ($payOrderId <= 0 || $amount <= 0) {
         $messages[] = ['type' => 'error', 'text' => 'Valid order and payment amount are required.'];
     } else {
-        $baseCur = SettingsService::currencySymbol();
-        $pdo->prepare('INSERT INTO supplier_payments (order_id, amount_paid, payment_date, payment_method, reference, notes, currency, exchange_rate, base_amount, created_at) VALUES (:oid, :amt, :dt, :m, :r, :n, :cur, 1.0000, :amt, NOW())')
-            ->execute(['oid' => $payOrderId, 'amt' => $amount, 'dt' => $payDate, 'm' => $payMethod, 'r' => $payRef, 'n' => $payNotes, 'cur' => $baseCur]);
-        $messages[] = ['type' => 'success', 'text' => 'Payment of ' . fmt($amount) . ' recorded for order #' . $payOrderId . '.'];
+        $poChk = $pdo->prepare('SELECT id, total_amount FROM purchase_orders WHERE id = :id');
+        $poChk->execute(['id' => $payOrderId]);
+        $po = $poChk->fetch();
+        if (!$po) {
+            $messages[] = ['type' => 'error', 'text' => 'Purchase order not found.'];
+        } else {
+            $pdo->beginTransaction();
+            try {
+                $baseCur = SettingsService::currencySymbol();
+                $pdo->prepare('INSERT INTO supplier_payments (order_id, amount_paid, payment_date, payment_method, reference, notes, currency, exchange_rate, base_amount, created_at) VALUES (:oid, :amt, :dt, :m, :r, :n, :cur, 1.0000, :base_amt, NOW())')
+                    ->execute(['oid' => $payOrderId, 'amt' => $amount, 'base_amt' => $amount, 'dt' => $payDate, 'm' => $payMethod, 'r' => $payRef, 'n' => $payNotes, 'cur' => $baseCur]);
+                // Keep purchase_orders.payment_status in sync with the total paid.
+                $paidStmt = $pdo->prepare('SELECT COALESCE(SUM(base_amount), 0) FROM supplier_payments WHERE order_id = :id');
+                $paidStmt->execute(['id' => $payOrderId]);
+                $paid = (float) $paidStmt->fetchColumn();
+                $poTotal = (float) $po['total_amount'];
+                $payStatus = ($poTotal > 0 && $paid >= $poTotal - 0.005) ? 'paid' : ($paid > 0 ? 'partial' : 'unpaid');
+                $pdo->prepare('UPDATE purchase_orders SET payment_status = :ps WHERE id = :id')
+                    ->execute(['ps' => $payStatus, 'id' => $payOrderId]);
+                $pdo->commit();
+                $messages[] = ['type' => 'success', 'text' => 'Payment of ' . fmt($amount) . ' recorded for purchase order #' . $payOrderId . '.'];
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) { $pdo->rollBack(); }
+                $messages[] = ['type' => 'error', 'text' => 'Could not record payment: ' . $e->getMessage()];
+            }
+        }
     }
 }
 
@@ -139,11 +166,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['_action_order'])) {
                 $total += $stmt->fetchColumn() * $quantity;
             }
 
-            $stmt = $pdo->prepare('INSERT INTO orders (supplier_id, order_date, total_amount, created_at) VALUES (:supplier, :order_date, :total, NOW())');
-            $stmt->execute(['supplier' => $supplierId, 'order_date' => $orderDate, 'total' => $total]);
-            $orderId = $pdo->lastInsertId();
+            $uid = (int) ($_SESSION['user_id'] ?? (currentUser()['id'] ?? 0));
+            $stmt = $pdo->prepare("INSERT INTO purchase_orders (supplier_id, order_date, status, total_amount, created_by, received_at, created_at) VALUES (:supplier, :order_date, 'received', :total, :uid, NOW(), NOW())");
+            $stmt->execute(['supplier' => $supplierId, 'order_date' => $orderDate, 'total' => $total, 'uid' => $uid]);
+            $orderId = (int) $pdo->lastInsertId();
 
-            $insertItem = $pdo->prepare('INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES (:order_id, :product_id, :quantity, :unit_price)');
+            $insertItem = $pdo->prepare('INSERT INTO purchase_order_items (purchase_order_id, product_id, quantity, unit_price, received_qty) VALUES (:order_id, :product_id, :quantity, :unit_price, :received_qty)');
             $insertBatch = $pdo->prepare('INSERT INTO product_batches (product_id, batch_number, expiry_date, quantity, purchase_price) VALUES (:product_id, :batch_number, :expiry_date, :quantity, :purchase_price)');
             foreach ($items as $item) {
                 $productId = (int) ($item['product_id'] ?? 0);
@@ -152,7 +180,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['_action_order'])) {
                 $stmt = $pdo->prepare('SELECT price FROM products WHERE id = :id');
                 $stmt->execute(['id' => $productId]);
                 $price = $stmt->fetchColumn();
-                $insertItem->execute(['order_id' => $orderId, 'product_id' => $productId, 'quantity' => $quantity, 'unit_price' => $price]);
+                $insertItem->execute(['order_id' => $orderId, 'product_id' => $productId, 'quantity' => $quantity, 'unit_price' => $price, 'received_qty' => $quantity]);
 
                 $wasBatchTracked = has_batches($pdo, $productId);
 
@@ -177,7 +205,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['_action_order'])) {
                 } else {
                     $pdo->prepare('UPDATE products SET stock_quantity = stock_quantity + :qty WHERE id = :id')->execute(['qty' => $quantity, 'id' => $productId]);
                 }
-                log_stock_movement($pdo, $productId, $quantity, 'Supplier order restock', 'order', (int) $orderId);
+                log_stock_movement($pdo, $productId, $quantity, 'Supplier order restock', 'purchase_order', (int) $orderId);
             }
             $pdo->commit();
             $messages[] = ['type' => 'success', 'text' => 'Order created successfully.'];
@@ -196,7 +224,7 @@ $params = [];
 if ($filterSupplier > 0) { $where[] = 'o.supplier_id = :supplier'; $params['supplier'] = $filterSupplier; }
 if ($filterDateFrom !== '') { $where[] = 'o.order_date >= :date_from'; $params['date_from'] = $filterDateFrom; }
 if ($filterDateTo !== '') { $where[] = 'o.order_date <= :date_to'; $params['date_to'] = $filterDateTo; }
-$sql = 'SELECT o.id, o.order_date, o.total_amount, s.name AS supplier_name, COALESCE(sp.paid, 0) AS paid FROM orders o LEFT JOIN suppliers s ON o.supplier_id = s.id LEFT JOIN (SELECT order_id, SUM(amount_paid) AS paid FROM supplier_payments GROUP BY order_id) sp ON sp.order_id = o.id';
+$sql = 'SELECT o.id, o.order_date, o.total_amount, s.name AS supplier_name, COALESCE(sp.paid, 0) AS paid FROM purchase_orders o LEFT JOIN suppliers s ON o.supplier_id = s.id LEFT JOIN (SELECT order_id, SUM(base_amount) AS paid FROM supplier_payments GROUP BY order_id) sp ON sp.order_id = o.id';
 if (!empty($where)) $sql .= ' WHERE ' . implode(' AND ', $where);
 $sql .= ' ORDER BY o.created_at DESC';
 $stmt = $pdo->prepare($sql);

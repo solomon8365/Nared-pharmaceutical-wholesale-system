@@ -3,7 +3,7 @@ if (ob_get_level() === 0) ob_start();
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/services/init.php';
 $user = currentUser();
-$page = $_GET['page'] ?? 'dashboard';
+$page = $page ?? ($_GET['page'] ?? 'dashboard');
 $pdo = getPDO();
 
 $unreadMsgCount = 0;
@@ -26,8 +26,17 @@ if ($user && isAdmin()) {
     } catch (Exception $e) {}
 }
 
+// Customer-submitted payments awaiting Finance verification (sidebar badge)
+$pendingCustPayments = 0;
+if ($user) {
+    try {
+        $pendingCustPayments = (int) $pdo->query("SELECT COUNT(*) FROM customer_payment_submissions WHERE status = 'pending'")->fetchColumn();
+    } catch (Exception $e) {}
+}
+
 $pageTitles = [
     'dashboard' => 'Home',
+    'super_admin_dashboard' => 'Super Admin',
     'products' => 'Products',
     'categories' => 'Categories',
     'suppliers' => 'Suppliers',
@@ -102,9 +111,10 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
     <link rel="stylesheet" href="assets/css/style.css?v=15">
     <link rel="stylesheet" href="assets/css/portal.css?v=1">
     <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.all.min.js"></script>
+    <script src="assets/vendor/sweetalert2/sweetalert2.all.min.js?v=1"></script>
+    <script>window.Swal || document.write('<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.all.min.js"><\/script>');</script>
     <script src="assets/js/action-notify.js?v=5"></script>
-    <script src="assets/js/swal.js?v=8"></script>
+    <script src="assets/js/swal.js?v=9"></script>
     <script src="assets/js/app.js?v=10"></script>
     <script src="assets/js/toast.js?v=2"></script>
     <script src="assets/js/scanner.js?v=2"></script>
@@ -112,7 +122,7 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
     <script>var csrfToken = '<?= csrf_token() ?>';var SESSION_TIMEOUT_MINUTES = <?= (int) sessionTimeoutMinutes() ?>;document.addEventListener('DOMContentLoaded',function(){var wrap=document.querySelector('.th-profile'),btn=document.getElementById('th-profile-btn'),menu=document.getElementById('th-profile-menu');if(!wrap||!btn||!menu)return;function list(){return Array.prototype.slice.call(menu.querySelectorAll('.th-menu-item')).filter(function(el){return !el.disabled&&el.offsetParent!==null;});}function isOpen(){return !menu.hidden;}function open(){menu.hidden=false;btn.setAttribute('aria-expanded','true');}function close(focus){menu.hidden=true;btn.setAttribute('aria-expanded','false');if(focus)btn.focus();}btn.addEventListener('click',function(e){e.stopPropagation();if(isOpen()){close(false);}else{open();}});document.addEventListener('click',function(e){if(isOpen()&&!e.target.closest('.th-profile'))close(false);});btn.addEventListener('keydown',function(e){var k=e.key,it;if(k==='ArrowDown'||k==='Enter'||k===' '){e.preventDefault();open();it=list();if(it.length)it[0].focus();}else if(k==='ArrowUp'){e.preventDefault();open();it=list();if(it.length)it[it.length-1].focus();}else if(k==='Escape'){close(true);}else if(k==='Tab'&&isOpen()){e.preventDefault();open();it=list();if(it.length)it[0].focus();}});menu.addEventListener('keydown',function(e){var k=e.key,it=list(),i=it.indexOf(document.activeElement);if(k==='Escape'){e.preventDefault();close(true);}else if(k==='ArrowDown'){e.preventDefault();if(it.length)it[(i+1+it.length)%it.length].focus();}else if(k==='ArrowUp'){e.preventDefault();if(it.length)it[(i-1+it.length)%it.length].focus();}else if(k==='Home'){e.preventDefault();if(it.length)it[0].focus();}else if(k==='End'){e.preventDefault();if(it.length)it[it.length-1].focus();}else if(k==='Tab'&&!e.shiftKey&&i===it.length-1){close(false);}});document.addEventListener('keydown',function(e){if(e.key==='Escape'&&isOpen())close(true);});var dm=document.getElementById('th-dark-toggle');if(dm){function sync(){var on=document.body.classList.contains('dark-mode'),i=dm.querySelector('i'),t=dm.querySelector('.th-menu-text');if(i)i.className=on?'fas fa-sun':'fas fa-moon';if(t)t.textContent=on?'Light Mode':'Dark Mode';}sync();dm.addEventListener('click',function(){if(typeof toggleDarkMode==='function')toggleDarkMode();sync();});}});</script>
-    <script src="assets/js/ajax-interceptor.js?v=8"></script>
+    <script src="assets/js/ajax-interceptor.js?v=9"></script>
     <style>.ajax-busy{pointer-events:none;opacity:.7}.ajax-busy i{margin-right:4px}</style>
 </head>
 <body class="<?= !empty($_COOKIE['dark_mode']) ? 'dark-mode' : '' ?>">
@@ -138,6 +148,21 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
     </div>
     <nav class="sidebar-nav">
         <a href="?page=dashboard" class="sidebar-link<?= $page === 'dashboard' ? ' active' : '' ?>"><i class="fas fa-home"></i><span>Home</span></a>
+        <?php if (isSuperAdmin()): ?>
+            <div class="sidebar-group<?= in_array($page, ['super_admin_dashboard','users','roles','settings','backup','audit_logs','login_history','departments','tax_currency','system_sync']) ? ' open' : '' ?>">
+                <div class="sidebar-group-header" onclick="toggleGroup('sadm')"><i class="fas fa-shield-halved"></i><span>Super Admin</span><i class="fas fa-chevron-right chevron"></i></div>
+                <div class="sidebar-group-content" id="group-sadm">
+                    <a href="?page=super_admin_dashboard" class="sidebar-link sub<?= $page === 'super_admin_dashboard' ? ' active' : '' ?>"><i class="fas fa-gauge-high"></i>Dashboard</a>
+                    <a href="?page=users" class="sidebar-link sub<?= $page === 'users' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Users</a>
+                    <a href="?page=roles" class="sidebar-link sub<?= $page === 'roles' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Roles &amp; Permissions</a>
+                    <div class="sidebar-divider"></div>
+                    <a href="?page=settings" class="sidebar-link sub<?= $page === 'settings' ? ' active' : '' ?>"><i class="fas fa-circle"></i>System Settings</a>
+                    <a href="?page=backup" class="sidebar-link sub<?= $page === 'backup' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Backup &amp; Restore</a>
+                    <a href="?page=audit_logs" class="sidebar-link sub<?= $page === 'audit_logs' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Audit Logs</a>
+                    <a href="?page=login_history" class="sidebar-link sub<?= $page === 'login_history' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Login History</a>
+                </div>
+            </div>
+        <?php endif; ?>
         <?php if (isAdmin()): ?>
             <?php if (hasPermission('store_dashboard', 'view') || hasPermission('products', 'view') || hasPermission('categories', 'view') || hasPermission('stock', 'view') || hasPermission('batch_expiry', 'view') || hasPermission('out_of_stock_queue', 'view') || hasPermission('expiry_management', 'view')): ?>
             <div class="sidebar-group<?= in_array($page, ['store_dashboard','products','categories','stock','batch_expiry','stock_movements','stock_adjustments','stock_transfers','physical_count','expiry_alerts','out_of_stock_queue','expiry_management']) ? ' open' : '' ?>">
@@ -352,6 +377,7 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
                 <div class="sidebar-group-header" onclick="toggleGroup('ffin')"><i class="fas fa-file-invoice-dollar"></i><span>Finance</span><i class="fas fa-chevron-right chevron"></i></div>
                 <div class="sidebar-group-content" id="group-ffin">
                     <a href="?page=finance_dashboard" class="sidebar-link sub<?= $page === 'finance_dashboard' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Dashboard</a>
+                    <a href="?page=finance_payments&tab=customer" class="sidebar-link sub<?= $page === 'finance_payments' ? ' active' : '' ?>"><i class="fas fa-user-check"></i>Customer Payments<?php if ($pendingCustPayments > 0): ?> <span style="background:#7c3aed;color:#fff;border-radius:10px;font-size:0.65rem;padding:1px 7px;font-weight:700"><?= $pendingCustPayments ?></span><?php endif; ?></a>
                     <a href="?page=supplier_payments" class="sidebar-link sub<?= $page === 'supplier_payments' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Supplier Payments</a>
                     <a href="?page=finance_bank" class="sidebar-link sub<?= $page === 'finance_bank' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Bank Management</a>
                     <a href="?page=finance_cash" class="sidebar-link sub<?= $page === 'finance_cash' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Cash Management</a>

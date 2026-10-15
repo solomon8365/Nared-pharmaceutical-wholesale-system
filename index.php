@@ -13,6 +13,15 @@ if ($page === 'products' && (isset($_GET['batch_data']) || isset($_GET['stock_hi
     exit;
 }
 
+// Handle customer payment receipts (standalone, printable) before any layout
+if ($page === 'payments' && isset($_GET['receipt'])) {
+    require_once __DIR__ . '/auth.php';
+    require_once __DIR__ . '/services/init.php';
+    requireLogin();
+    require_once __DIR__ . '/pages/payments.php';
+    exit;
+}
+
 if (isset($_GET['export']) && in_array($page, ['reports', 'finance_reports', 'my_orders', 'warehouse_reports'], true)) {
     require_once __DIR__ . '/auth.php';
     require_once __DIR__ . '/pages/' . $page . '.php';
@@ -72,7 +81,9 @@ if (SettingsService::maintenanceMode() && !isSuperAdmin()) {
 }
 
 $publicPages = ['login', 'register', 'catalog'];
-$standalonePages = ['login', 'register', 'catalog', 'receipt', 'invoice', 'lock'];
+// 'catalog' is intentionally NOT standalone: it renders inside the shared
+// header/footer so customers get the portal navigation and shared styling.
+$standalonePages = ['login', 'register', 'receipt', 'invoice', 'lock'];
 
 if ($page === 'logout') {
     logout(isset($_GET['expired']) ? '&expired=1' : '');
@@ -84,6 +95,7 @@ if (!in_array($page, $publicPages, true)) {
 
 $allowedPages = [
     'dashboard',
+    'super_admin_dashboard',
     'store_dashboard',
     'products',
     'categories',
@@ -235,7 +247,7 @@ if (currentUser() && in_array($page, ['delivery_staff','delivery_assign','delive
 // Dynamic permission guard for custom roles (and all non-admin roles)
 if (currentUser() && (!isAdmin() || getUserRoleId() !== 1) && !in_array($page, $publicPages, true) && !in_array($page, $standalonePages, true)) {
     $pageModule = $page;
-    if (in_array($pageModule, ['receipt', 'login', 'register', 'catalog', '404', 'dashboard', 'customer_settings', 'change_password', 'info', 'messages', 'place_order', 'my_orders', 'invoice', 'payments', 'help_center', 'credit_portal', 'credit_control', 'credit_reports', 'customer_statement', 'finance_dashboard', 'finance_payments', 'finance_refunds', 'finance_reports', 'finance_bank', 'finance_cash', 'finance_expenses', 'finance_accounting', 'finance_charts', 'delivery_dashboard', 'delivery_assign', 'delivery_tracking', 'delivery_confirm', 'delivery_history', 'delivery_returns', 'delivery_staff', 'assign_deliveries', 'delivery_confirmation', 'departments', 'login_history', 'audit_logs', 'tax_currency', 'warehouse_reports', 'ledger'], true)) {
+    if (in_array($pageModule, ['receipt', 'login', 'register', 'catalog', '404', 'dashboard', 'customer_settings', 'change_password', 'info', 'messages', 'place_order', 'my_orders', 'invoice', 'payments', 'help_center', 'credit_portal', 'credit_control', 'credit_reports', 'customer_statement', 'finance_dashboard', 'finance_payments', 'finance_refunds', 'finance_reports', 'finance_bank', 'finance_cash', 'finance_expenses', 'finance_accounting', 'finance_charts', 'delivery_dashboard', 'delivery_assign', 'delivery_tracking', 'delivery_confirm', 'delivery_history', 'delivery_returns', 'delivery_staff', 'assign_deliveries', 'delivery_confirmation', 'departments', 'login_history', 'audit_logs', 'tax_currency', 'warehouse_reports', 'warehouse_inventory', 'ledger'], true)) {
         // Skip permission check for dashboard (redirect target) and public/standalone pages
     } elseif (!hasPermission($pageModule, 'view')) {
         // If user has a custom role without this page permission, redirect to dashboard

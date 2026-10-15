@@ -116,6 +116,8 @@ foreach ($rpStmt->fetchAll() as $rp) {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     require_csrf();
+    // Mutating roles/permissions is a privileged operation.
+    requirePermission('roles', 'manage');
     $action = $_POST['_action'] ?? '';
 
     if ($action === 'create' || $action === 'save') {
@@ -135,20 +137,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt->execute(['n' => $name, 'd' => $description, 's' => $status, 'c' => $color]);
                 $roleId = (int) $pdo->lastInsertId();
                 if ($copyFromId > 0) copyRolePermissions($copyFromId, $roleId);
+                logAdminAction('role.create', 'role', $roleId, "Created role '{$name}'");
                 $messages[] = ['type' => 'success', 'text' => "Role '{$name}' created."];
             } else {
                 $roleId = (int) ($_POST['role_id'] ?? 0);
                 if ($roleId <= 0) {
                     $errors[] = 'Invalid role.';
+                } elseif ($roleId === 1 && !isSuperAdmin()) {
+                    // Root-role protection: only a Super Admin may modify role 1.
+                    $errors[] = 'Only a Super Admin can modify the Super Admin role.';
                 } elseif ($roleId === 1) {
                     // The root slot is referenced by code (role_id 1 = Super Admin
                     // bypass), so its name must never be edited out from under it.
                     $pdo->prepare("UPDATE roles SET name = 'Super Admin', description = :d, status = :s, color = :c WHERE id = 1")
                         ->execute(['d' => $description, 's' => $status, 'c' => $color]);
+                    logAdminAction('role.update', 'role', 1, 'Updated Super Admin role');
                     $messages[] = ['type' => 'success', 'text' => 'Super Admin role updated (name is fixed).'];
                 } else {
                     $pdo->prepare('UPDATE roles SET name = :n, description = :d, status = :s, color = :c WHERE id = :id')
                         ->execute(['n' => $name, 'd' => $description, 's' => $status, 'c' => $color, 'id' => $roleId]);
+                    logAdminAction('role.update', 'role', $roleId, "Updated role '{$name}'");
                     $messages[] = ['type' => 'success', 'text' => "Role '{$name}' saved."];
                 }
             }
@@ -211,6 +219,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $rolePermissions[$roleId][$mod][$perm] = true;
                     }
                 }
+                logAdminAction('role.permissions', 'role', $roleId, 'Role permissions saved');
                 $messages[] = ['type' => 'success', 'text' => 'Permissions saved.'];
             }
             // Refresh roles list in case of create
@@ -242,6 +251,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 clearPermissionCache();
                 $roles = $pdo->query('SELECT * FROM roles ORDER BY is_system DESC, name ASC')->fetchAll();
                 $roleId = $newId;
+                logAdminAction('role.clone', 'role', $newId, "Cloned role '{$src['name']}' → '{$newName}'");
                 $messages[] = ['type' => 'success', 'text' => "Cloned '{$src['name']}' → '{$newName}'."];
             }
         }
@@ -263,6 +273,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->prepare('DELETE FROM roles WHERE id = :id')->execute(['id' => $deleteId]);
                 clearPermissionCache();
                 $roles = $pdo->query('SELECT * FROM roles ORDER BY is_system DESC, name ASC')->fetchAll();
+                logAdminAction('role.delete', 'role', $deleteId, "Deleted role '{$role['name']}'");
                 $messages[] = ['type' => 'success', 'text' => "Role '{$role['name']}' deleted."];
             }
         }

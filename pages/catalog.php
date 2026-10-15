@@ -18,6 +18,9 @@ $totalActive = array_sum($catCounts);
 
 $user = currentUser();
 $isCustomerUser = $user && isCustomer();
+// Internal stock detail (low-stock buckets, expiry dates, batch numbers) is shown only to
+// signed-in staff. Customers and guests see a binary In Stock / Out of Stock status.
+$catShowInternal = $user !== null && !isCustomer();
 $customerId = 0;
 if ($isCustomerUser) {
     try { $cStmt = $pdo->prepare('SELECT id FROM customers WHERE id = (SELECT customer_id FROM users WHERE id = :uid)'); $cStmt->execute(['uid' => $user['id']]); $customerId = (int)$cStmt->fetchColumn(); } catch (Exception $e) {}
@@ -73,9 +76,9 @@ if ($search !== '') {
 if ($catFilter > 0) { $sql .= ' AND p.category_id = :cat'; $params['cat'] = $catFilter; }
 if ($mfrFilter !== '') { $sql .= ' AND p.manufacturer = :mfr'; $params['mfr'] = $mfrFilter; }
 if ($stockFilter === 'in_stock') $sql .= ' AND p.stock_quantity > 0';
-elseif ($stockFilter === 'low_stock') $sql .= ' AND p.stock_quantity > 0 AND p.stock_quantity <= 10';
+elseif ($catShowInternal && $stockFilter === 'low_stock') $sql .= ' AND p.stock_quantity > 0 AND p.stock_quantity <= 10';
 elseif ($stockFilter === 'out_of_stock') $sql .= ' AND p.stock_quantity <= 0';
-elseif ($stockFilter === 'expiring') $sql .= ' AND p.id IN (SELECT product_id FROM product_batches WHERE quantity > 0 AND expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 90 DAY))';
+elseif ($catShowInternal && $stockFilter === 'expiring') $sql .= ' AND p.id IN (SELECT product_id FROM product_batches WHERE quantity > 0 AND expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 90 DAY))';
 
 $orderBy = match($sort) { 'price_asc'=>'p.price ASC','price_desc'=>'p.price DESC','stock'=>'p.stock_quantity ASC','newest'=>'p.created_at DESC', default=>'p.name ASC' };
 $sql .= ' ORDER BY ' . $orderBy;
@@ -114,14 +117,11 @@ function buildBatchJson(array $batchMap, int $pid): string {
     foreach ($batchMap[$pid] ?? [] as $b) $arr[] = ['batch'=>$b['batch_number'],'expiry'=>$b['expiry_date'],'qty'=>(int)$b['quantity']];
     return htmlspecialchars(json_encode($arr));
 }
-function stockBadge(int $s): array {
-    if ($s <= 0) return ['Out of Stock','out','fa-times-circle'];
-    if ($s <= 10) return ['Low Stock','low','fa-exclamation-triangle'];
-    return ['In Stock','in','fa-check-circle'];
-}
-function stockPct(int $s): int {
-    if ($s <= 0) return 0;
-    return max(0, min(100, (int)round($s / 200 * 100)));
+function stockBadge(int $s, bool $internal = false): array {
+    if ($s <= 0) return ['OUT OF STOCK','out','fa-times-circle'];
+    // "Low stock" is an internal operational signal; customers only ever see In/Out.
+    if ($internal && $s <= 10) return ['LOW STOCK','low','fa-exclamation-triangle'];
+    return ['IN STOCK','in','fa-check-circle'];
 }
 function catIcon(string $name): string {
     $n = strtolower($name);
@@ -132,29 +132,27 @@ function catIcon(string $name): string {
 
 /* ── Country flags ── */
 $flags = ['Ethiopia'=>'🇪🇹','India'=>'🇮🇳','China'=>'🇨🇳','USA'=>'🇺🇸','Germany'=>'🇩🇪','UK'=>'🇬🇧','France'=>'🇫🇷','Japan'=>'🇯🇵','Switzerland'=>'🇨🇭','Italy'=>'🇮🇹','Turkey'=>'🇹🇷','Nigeria'=>'🇳🇬','Kenya'=>'🇰🇪','Egypt'=>'🇪🇬','South Korea'=>'🇰🇷','Brazil'=>'🇧🇷'];
-function countryFlag(string $country): string { global $flags; return $flags[$country] ?? '🌍'; }
+if (!function_exists('countryFlag')) {
+    function countryFlag(string $country): string { global $flags; return $flags[$country] ?? '🌍'; }
+}
 ?>
 <style>
 .cat{--cat-brand:#2563eb;--cat-brand-d:#1d4ed8;--cat-brand-l:#eff6ff;--cat-bg:#ffffff;--cat-bg2:#f8fafc;--cat-bg3:#f1f5f9;--cat-title:#0f172a;--cat-title2:#334155;--cat-mut:#64748b;--cat-faint:#94a3b8;--cat-line:#e2e8f0;--cat-line2:#f1f5f9;--cat-ok:#16a34a;--cat-warn:#d97706;--cat-bad:#dc2626;--cat-ring:rgba(37,99,235,0.12);max-width:1400px;margin:0 auto}
 body.dark-mode .cat{--cat-brand:#3b82f6;--cat-brand-d:#60a5fa;--cat-brand-l:#172554;--cat-bg:#1f2937;--cat-bg2:#111827;--cat-bg3:#374151;--cat-title:#f1f5f9;--cat-title2:#e5e7eb;--cat-mut:#9ca3af;--cat-faint:#6b7280;--cat-line:#374151;--cat-line2:#273244;--cat-ring:rgba(96,165,250,0.18)}
 
-/* ── Hero ── */
-.cat-hero{position:relative;overflow:hidden;border-radius:18px;background:linear-gradient(130deg,#1e3a8a 0%,#1d4ed8 48%,#0ea5e9 100%);color:#fff;padding:26px 30px;margin-bottom:16px;box-shadow:0 12px 32px rgba(29,78,216,0.28)}
-.cat-hero::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 88% 12%,rgba(255,255,255,0.2),transparent 44%),radial-gradient(circle at 6% 115%,rgba(255,255,255,0.12),transparent 42%)}
-.cat-hero-deco{position:absolute;border-radius:24px;background:rgba(255,255,255,0.09);border:1px solid rgba(255,255,255,0.14);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.4);transform:rotate(-8deg);pointer-events:none}
-.cat-hero-deco.d1{width:120px;height:120px;right:10px;top:-36px;font-size:2.6rem}
-.cat-hero-deco.d2{width:72px;height:72px;right:152px;bottom:-22px;font-size:1.25rem;transform:rotate(14deg)}
-.cat-hero-deco.d3{width:46px;height:46px;right:46px;bottom:28px;font-size:0.9rem;transform:rotate(-20deg)}
+/* ── Hero / page header ── */
+.cat-hero{position:relative;overflow:hidden;border-radius:16px;background:linear-gradient(135deg,#1e3a8a 0%,#1d4ed8 100%);color:#fff;padding:22px 26px;margin-bottom:14px;box-shadow:0 8px 22px rgba(29,78,216,0.22)}
+.cat-hero::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 90% 0%,rgba(255,255,255,0.14),transparent 46%)}
 .cat-hero-inner{position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:22px;flex-wrap:wrap}
-.cat-hero-eyebrow{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,0.16);border:1px solid rgba(255,255,255,0.28);padding:5px 13px;border-radius:99px;font-size:0.7rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase}
-.cat-hero-title{font-size:1.65rem;font-weight:800;margin:12px 0 6px;line-height:1.2;letter-spacing:-0.01em}
+.cat-hero-eyebrow{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,0.16);border:1px solid rgba(255,255,255,0.28);padding:4px 12px;border-radius:99px;font-size:0.68rem;font-weight:700;letter-spacing:0.06em;text-transform:uppercase}
+.cat-hero-title{font-size:1.5rem;font-weight:800;margin:10px 0 5px;line-height:1.2;letter-spacing:-0.01em}
 .cat-hero-title .hl{color:#bae6fd}
-.cat-hero-sub{font-size:0.9rem;color:rgba(255,255,255,0.88);margin:0;max-width:620px;line-height:1.55}
+.cat-hero-sub{font-size:0.86rem;color:rgba(255,255,255,0.86);margin:0;max-width:620px;line-height:1.5}
 .cat-hero-stats{display:flex;gap:10px;flex-shrink:0}
-.cat-stat{background:rgba(255,255,255,0.14);border:1px solid rgba(255,255,255,0.22);border-radius:14px;padding:10px 16px;min-width:100px;text-align:center;backdrop-filter:blur(6px)}
-.cat-stat i{font-size:1rem;display:block;margin-bottom:4px;opacity:0.85}
-.cat-stat b{display:block;font-size:1.25rem;line-height:1.1}
-.cat-stat span{font-size:0.7rem;font-weight:600;opacity:0.88}
+.cat-stat{background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.2);border-radius:12px;padding:9px 15px;min-width:92px;text-align:center}
+.cat-stat i{font-size:0.95rem;display:block;margin-bottom:3px;opacity:0.85}
+.cat-stat b{display:block;font-size:1.2rem;line-height:1.1}
+.cat-stat span{font-size:0.68rem;font-weight:600;opacity:0.86}
 
 /* ── Category chips ── */
 .cat-chips{display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;margin-bottom:14px;-webkit-overflow-scrolling:touch;scrollbar-width:none}
@@ -190,14 +188,18 @@ body.dark-mode .cat{--cat-brand:#3b82f6;--cat-brand-d:#60a5fa;--cat-brand-l:#172
 .cat-view.active{background:var(--cat-brand);color:#fff}
 .cat-view:hover:not(.active){background:var(--cat-bg2)}
 
-.cat-tabs{display:flex;gap:0;border-bottom:2px solid var(--cat-line);margin-bottom:20px}
-.cat-tab{padding:10px 20px;font-size:0.88rem;font-weight:600;color:var(--cat-mut);cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;margin-bottom:-2px;display:flex;align-items:center;gap:6px;transition:all 0.15s;text-decoration:none}
+.cat-tabs{display:flex;gap:0;border-bottom:2px solid var(--cat-line);margin-bottom:20px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.cat-tabs::-webkit-scrollbar{display:none}
+.cat-tab{padding:10px 20px;font-size:0.88rem;font-weight:600;color:var(--cat-mut);cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;margin-bottom:-2px;display:flex;align-items:center;gap:6px;transition:all 0.15s;text-decoration:none;white-space:nowrap;flex:0 0 auto}
 .cat-tab:hover{color:var(--cat-title)}
 .cat-tab.active{color:var(--cat-brand);border-bottom-color:var(--cat-brand)}
 .cat-tab-count{background:var(--cat-bg3);padding:2px 8px;border-radius:12px;font-size:0.72rem;font-weight:700;color:var(--cat-mut)}
 .cat-tab.active .cat-tab-count{background:var(--cat-brand-l);color:var(--cat-brand)}
 
-.cat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;margin-bottom:24px}
+.cat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+@media(max-width:1280px){.cat-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:992px){.cat-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:640px){.cat-grid{grid-template-columns:1fr}}
 .cat-list{display:flex;flex-direction:column;gap:10px;margin-bottom:24px}
 
 /* ── Product cards ── */
@@ -210,7 +212,7 @@ body.dark-mode .cat-card:hover{border-color:var(--cat-brand)}
 .cat-card-fav,.cat-card-cmp{width:32px;height:32px;border-radius:50%;border:1.5px solid var(--cat-line);background:var(--cat-bg);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all 0.15s;font-size:0.8rem;color:var(--cat-faint);box-shadow:0 1px 3px rgba(15,23,42,0.08)}
 .cat-card-fav:hover,.cat-card-fav.active{background:#fef2f2;border-color:#fca5a5;color:#dc2626}
 .cat-card-cmp:hover,.cat-card-cmp.active{background:var(--cat-brand-l);border-color:#93c5fd;color:var(--cat-brand)}
-.cat-card-img{height:170px;background:linear-gradient(135deg,var(--cat-bg2),var(--cat-bg3));display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
+.cat-card-img{height:160px;background:linear-gradient(135deg,var(--cat-bg2),var(--cat-bg3));display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;border-bottom:1px solid var(--cat-line2)}
 .cat-card-img img{width:100%;height:100%;object-fit:cover}
 .cat-card-img .no-img{color:var(--cat-line);font-size:2.6rem}
 .cat-card-badge{position:absolute;top:12px;left:12px;display:flex;gap:6px;flex-wrap:wrap}
@@ -226,10 +228,10 @@ body.dark-mode .cat-card:hover{border-color:var(--cat-brand)}
 .cat-badge.freq{background:rgba(220,38,38,0.9);color:#fff}
 .cat-badge.exp{background:rgba(190,18,60,0.12);color:#be123c;backdrop-filter:blur(4px)}
 body.dark-mode .cat-badge.exp{background:rgba(244,63,94,0.14);color:#fb7185}
-.cat-card-body{padding:15px 16px 4px;flex:1;display:flex;flex-direction:column}
-.cat-card-name{font-size:0.95rem;font-weight:700;color:var(--cat-title);margin:0 0 4px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.cat-card-sub{font-size:0.78rem;color:var(--cat-mut);margin:0 0 10px}
-.cat-card-details{display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;font-size:0.78rem;margin-bottom:auto}
+.cat-card-body{padding:16px 18px 4px;flex:1;display:flex;flex-direction:column;gap:8px}
+.cat-card-name{font-size:0.98rem;font-weight:800;color:var(--cat-title);margin:0;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;letter-spacing:-0.01em}
+.cat-card-sub{font-size:0.82rem;color:var(--cat-mut);margin:0;line-height:1.45}
+.cat-card-details{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;font-size:0.78rem;margin-top:auto;padding-top:8px}
 .cat-card-details dt{color:var(--cat-faint);font-weight:500}
 .cat-card-details dd{color:var(--cat-title2);font-weight:600;margin:0}
 .cat-card-origin{display:inline-flex;align-items:center;gap:4px;font-size:0.75rem;color:var(--cat-mut);margin-top:6px}
@@ -247,6 +249,9 @@ body.dark-mode .cat-badge.exp{background:rgba(244,63,94,0.14);color:#fb7185}
 .cat-card-order:disabled{background:#cbd5e1;cursor:not-allowed;transform:none}
 .cat-card-order.login{background:#64748b}
 .cat-card-order.login:hover{background:#475569}
+.cat-card-order.ghost{background:var(--cat-bg);color:var(--cat-brand);border:1.5px solid var(--cat-line)}
+.cat-card-order.ghost:hover{background:var(--cat-brand-l);border-color:var(--cat-brand)}
+.cat-list-right .cat-card-order.ghost{padding:8px 14px}
 
 /* ── List view ── */
 .cat-list-card{background:var(--cat-bg);border:1px solid var(--cat-line);border-radius:12px;padding:16px 20px;display:flex;align-items:center;gap:16px;transition:all 0.2s}
@@ -289,20 +294,15 @@ body.dark-mode .cat-list-card:hover{border-color:var(--cat-brand)}
 .pd-section-title{font-size:0.78rem;font-weight:700;color:var(--cat-mut);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:8px}
 .pd-batch{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border:1px solid var(--cat-line);border-radius:8px;margin-bottom:6px;font-size:0.82rem}
 .pd-batch span{color:var(--cat-title2)}
-.pd-stock-bar{height:6px;background:var(--cat-bg3);border-radius:99px;overflow:hidden;margin-top:8px}
-.pd-stock-fill{height:100%;border-radius:99px;transition:width 0.3s}
 .pd-footer{padding:16px 24px;border-top:1px solid var(--cat-line2);display:flex;align-items:center;justify-content:space-between}
 
 @media(max-width:900px){.cat-hero-stats{width:100%;justify-content:flex-start;flex-wrap:wrap}}
-@media(max-width:768px){.cat-grid{grid-template-columns:1fr}.cat-toolbar{flex-direction:column;align-items:stretch}.cat-filters{flex-direction:column}.cat-filter{width:100%}.cat-list-card{flex-direction:column;align-items:stretch}.cat-list-right{justify-content:space-between}.cat-list-meta{flex-wrap:wrap}.pd-grid{grid-template-columns:1fr}.cat-hero{padding:22px 18px}.cat-hero-title{font-size:1.35rem}.cat-hero-deco{opacity:0.5}}
+@media(max-width:768px){.cat-toolbar{flex-direction:column;align-items:stretch}.cat-filters{flex-direction:column}.cat-filter{width:100%}.cat-list-card{flex-direction:column;align-items:stretch}.cat-list-right{justify-content:space-between}.cat-list-meta{flex-wrap:wrap}.pd-grid{grid-template-columns:1fr}.cat-hero{padding:20px 18px}.cat-hero-title{font-size:1.3rem}}
 @media(max-width:520px){.cat-hero-stats{display:grid;grid-template-columns:repeat(3,1fr);width:100%}.cat-stat{min-width:0;padding:8px 6px}.cat-stat b{font-size:1.05rem}}
 </style>
 
 <section class="cat">
 <div class="cat-hero">
-    <div class="cat-hero-deco d1"><i class="fas fa-capsules"></i></div>
-    <div class="cat-hero-deco d2"><i class="fas fa-prescription-bottle"></i></div>
-    <div class="cat-hero-deco d3"><i class="fas fa-syringe"></i></div>
     <div class="cat-hero-inner">
         <div class="cat-hero-copy">
             <span class="cat-hero-eyebrow"><i class="fas fa-capsules"></i> Pharmaceutical Catalog</span>
@@ -344,7 +344,7 @@ body.dark-mode .cat-list-card:hover{border-color:var(--cat-brand)}
         <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
         <select name="category_id" class="cat-filter" onchange="this.form.submit()"><option value="">All Categories</option><?php foreach ($allCats as $c): ?><option value="<?= $c['id'] ?>"<?= $catFilter === (int)$c['id'] ? ' selected' : '' ?>><?= htmlspecialchars($c['name']) ?></option><?php endforeach; ?></select>
         <select name="manufacturer" class="cat-filter" onchange="this.form.submit()"><option value="">All Manufacturers</option><?php foreach ($allManufacturers as $m): ?><option value="<?= htmlspecialchars($m) ?>"<?= $mfrFilter === $m ? ' selected' : '' ?>><?= htmlspecialchars($m) ?></option><?php endforeach; ?></select>
-        <select name="stock_status" class="cat-filter" onchange="this.form.submit()"><option value="">All Stock</option><option value="in_stock"<?= $stockFilter==='in_stock'?' selected':'' ?>>In Stock</option><option value="low_stock"<?= $stockFilter==='low_stock'?' selected':'' ?>>Low Stock</option><option value="out_of_stock"<?= $stockFilter==='out_of_stock'?' selected':'' ?>>Out of Stock</option><option value="expiring"<?= $stockFilter==='expiring'?' selected':'' ?>>Expiring Soon</option></select>
+        <select name="stock_status" class="cat-filter" onchange="this.form.submit()"><option value="">All Stock</option><option value="in_stock"<?= $stockFilter==='in_stock'?' selected':'' ?>>In Stock</option><?php if ($catShowInternal): ?><option value="low_stock"<?= $stockFilter==='low_stock'?' selected':'' ?>>Low Stock</option><?php endif; ?><option value="out_of_stock"<?= $stockFilter==='out_of_stock'?' selected':'' ?>>Out of Stock</option><?php if ($catShowInternal): ?><option value="expiring"<?= $stockFilter==='expiring'?' selected':'' ?>>Expiring Soon</option><?php endif; ?></select>
         <select name="sort" class="cat-filter" onchange="this.form.submit()"><option value="name"<?= $sort==='name'?' selected':'' ?>>Name A-Z</option><option value="price_asc"<?= $sort==='price_asc'?' selected':'' ?>>Price Low-High</option><option value="price_desc"<?= $sort==='price_desc'?' selected':'' ?>>Price High-Low</option><option value="stock"<?= $sort==='stock'?' selected':'' ?>>Stock Low-High</option><option value="newest"<?= $sort==='newest'?' selected':'' ?>>Newest</option></select>
         <?php if ($search||$catFilter||$mfrFilter||$stockFilter): ?><a href="?page=catalog" class="cat-clear"><i class="fas fa-times"></i> Clear</a><?php endif; ?>
     </form>
@@ -378,19 +378,22 @@ $tabFrequentIds = array_column($frequentlyOrdered, 'id');
 <?php if ($viewMode === 'list'): ?>
 <div class="cat-list">
     <?php foreach ($displayProducts as $p):
-        $pid=(int)$p['id']; $stock=(int)$p['stock_quantity']; $sb=stockBadge($stock);
+        $pid=(int)$p['id']; $stock=(int)$p['stock_quantity']; $sb=stockBadge($stock, $catShowInternal);
         $isFav=in_array($pid,$favIds); $isCmp=in_array($pid,$compareIds); $isFrq=in_array($pid,$tabFrequentIds);
+        $imgFull = (!empty($p['image_path']) && file_exists(__DIR__.'/../uploads/products/'.$p['image_path'])) ? PRODUCT_UPLOAD_URL.'/'.htmlspecialchars($p['image_path']) : '';
+        $wp = ($isCustomerUser && (float)($p['wholesale_price'] ?? 0) > 0 && (float)$p['wholesale_price'] < (float)$p['price']) ? (float)$p['wholesale_price'] : 0;
     ?>
-    <div class="cat-list-card">
+    <div class="cat-list-card" data-pid="<?= $pid ?>" data-name="<?= htmlspecialchars($p['name']) ?>" data-brand="<?= htmlspecialchars($p['brand']??'') ?>" data-generic="<?= htmlspecialchars($p['generic_name']??'') ?>" data-barcode="<?= htmlspecialchars($p['barcode']??'') ?>" data-dosage="<?= htmlspecialchars($p['dosage_form']??'') ?>" data-strength="<?= htmlspecialchars($p['strength']??'') ?>" data-mfr="<?= htmlspecialchars($p['manufacturer']??'') ?>" data-category="<?= htmlspecialchars($p['category_name']??'') ?>" data-price="<?= fmt((float)$p['price']) ?>" data-pack="<?= htmlspecialchars($p['pack_size']??'') ?>" data-unit="<?= htmlspecialchars($p['unit_of_measure']??'') ?>" data-country="<?= htmlspecialchars($p['country_of_origin']??'') ?>" data-storage="<?= htmlspecialchars($p['storage_condition']??'') ?>" data-desc="<?= htmlspecialchars($p['description']??'') ?>" data-image="<?= $imgFull ?>" data-mfg="<?= htmlspecialchars($p['manufacturing_date']??'') ?>" data-rx="<?= (int)($p['requires_prescription']??0) ?>" data-wp="<?= $wp > 0 ? fmt($wp) : '' ?>" data-avail="<?= $stock <= 0 ? 0 : 1 ?>" data-lowstock="<?= ($catShowInternal && $stock > 0 && $stock <= 10) ? 1 : 0 ?>" data-batches="<?= buildBatchJson($batchMap,$pid) ?>">
         <div class="cat-list-img">
-            <?php if (!empty($p['image_path']) && file_exists(__DIR__.'/../uploads/products/'.$p['image_path'])): ?><img src="<?= PRODUCT_UPLOAD_URL.'/'.htmlspecialchars($p['image_path']) ?>" alt=""><?php else: ?><span class="no-img"><i class="fas fa-pills"></i></span><?php endif; ?>
+            <?php if ($imgFull): ?><img src="<?= $imgFull ?>" alt=""><?php else: ?><span class="no-img"><i class="fas fa-pills"></i></span><?php endif; ?>
         </div>
         <div class="cat-list-info">
             <div class="cat-list-name"><?= htmlspecialchars($p['name']) ?></div>
-            <div class="cat-list-sub"><?= htmlspecialchars(($p['brand']??'').($p['brand']&&$p['generic_name']?' — ':'').($p['generic_name']??'')) ?></div>
+            <div class="cat-list-sub"><?= htmlspecialchars(($p['generic_name'] ?? '') ?: ($p['brand'] ?? '')) ?></div>
             <div class="cat-list-meta">
-                <?php if ($p['dosage_form']): ?><span><i class="fas fa-pills"></i> <?= htmlspecialchars($p['dosage_form']) ?></span><?php endif; ?>
                 <?php if ($p['strength']): ?><span><i class="fas fa-weight-hanging"></i> <?= htmlspecialchars($p['strength']) ?></span><?php endif; ?>
+                <?php if ($p['dosage_form']): ?><span><i class="fas fa-pills"></i> <?= htmlspecialchars($p['dosage_form']) ?></span><?php endif; ?>
+                <?php if ($p['category_name']): ?><span><i class="fas fa-th-large"></i> <?= htmlspecialchars($p['category_name']) ?></span><?php endif; ?>
                 <?php if ($p['manufacturer']): ?><span><i class="fas fa-factory"></i> <?= htmlspecialchars($p['manufacturer']) ?></span><?php endif; ?>
             </div>
         </div>
@@ -399,11 +402,12 @@ $tabFrequentIds = array_column($frequentlyOrdered, 'id');
                 <div class="cat-list-price"><?= fmt((float)$p['price']) ?></div>
                 <span class="cat-badge <?= $sb[1] ?>" style="margin-top:4px"><i class="fas <?= $sb[2] ?>"></i> <?= $sb[0] ?></span>
             </div>
+            <button type="button" class="cat-card-order ghost" onclick="showCatDetail(this.closest('.cat-list-card'))"><i class="fas fa-eye"></i> Details</button>
             <?php if ($isCustomerUser): ?>
             <?php if ($stock <= 0): ?>
             <button class="cat-card-order" disabled title="Out of stock"><i class="fas fa-times-circle"></i> Out of Stock</button>
             <?php else: ?>
-            <a class="cat-card-order" href="index.php?page=place_order&product_id=<?= $pid ?>"><i class="fas fa-cart-plus"></i> Order</a>
+            <a class="cat-card-order" href="index.php?page=place_order&product_id=<?= $pid ?>"><i class="fas fa-cart-plus"></i> Add to Order</a>
             <?php endif; ?>
             <?php else: ?>
             <a class="cat-card-order login" href="index.php?page=login"><i class="fas fa-sign-in-alt"></i> Sign In</a>
@@ -416,12 +420,15 @@ $tabFrequentIds = array_column($frequentlyOrdered, 'id');
 <?php else: ?>
 <div class="cat-grid">
     <?php foreach ($displayProducts as $p):
-        $pid=(int)$p['id']; $stock=(int)$p['stock_quantity']; $sb=stockBadge($stock); $pct=stockPct($stock);
+        $pid=(int)$p['id']; $stock=(int)$p['stock_quantity']; $sb=stockBadge($stock, $catShowInternal);
         $isFav=in_array($pid,$favIds); $isCmp=in_array($pid,$compareIds); $isFrq=in_array($pid,$tabFrequentIds);
         $earliest=$expiryMap[$pid]??null; $expSoon=($earliest && $stock>0 && strtotime($earliest) <= strtotime('+90 days'));
         $imgFull = (!empty($p['image_path']) && file_exists(__DIR__.'/../uploads/products/'.$p['image_path'])) ? PRODUCT_UPLOAD_URL.'/'.htmlspecialchars($p['image_path']) : '';
+        // Wholesale price is only shown to signed-in customers, and only when the business rule
+        // applies (wholesale_price is set and lower than retail). It is the price used on pickup orders.
+        $wp = ($isCustomerUser && (float)($p['wholesale_price'] ?? 0) > 0 && (float)$p['wholesale_price'] < (float)$p['price']) ? (float)$p['wholesale_price'] : 0;
     ?>
-    <div class="cat-card" onclick="showCatDetail(this)" data-pid="<?= $pid ?>" data-name="<?= htmlspecialchars($p['name']) ?>" data-brand="<?= htmlspecialchars($p['brand']??'') ?>" data-generic="<?= htmlspecialchars($p['generic_name']??'') ?>" data-barcode="<?= htmlspecialchars($p['barcode']??'') ?>" data-dosage="<?= htmlspecialchars($p['dosage_form']??'') ?>" data-strength="<?= htmlspecialchars($p['strength']??'') ?>" data-mfr="<?= htmlspecialchars($p['manufacturer']??'') ?>" data-category="<?= htmlspecialchars($p['category_name']??'') ?>" data-price="<?= fmt((float)$p['price']) ?>" data-stock="<?= $stock ?>" data-pack="<?= htmlspecialchars($p['pack_size']??'') ?>" data-unit="<?= htmlspecialchars($p['unit_of_measure']??'') ?>" data-country="<?= htmlspecialchars($p['country_of_origin']??'') ?>" data-storage="<?= htmlspecialchars($p['storage_condition']??'') ?>" data-desc="<?= htmlspecialchars($p['description']??'') ?>" data-image="<?= $imgFull ?>" data-mfg="<?= htmlspecialchars($p['manufacturing_date']??'') ?>" data-rx="<?= (int)($p['requires_prescription']??0) ?>" data-batches="<?= buildBatchJson($batchMap,$pid) ?>">
+    <div class="cat-card" onclick="showCatDetail(this)" data-pid="<?= $pid ?>" data-name="<?= htmlspecialchars($p['name']) ?>" data-brand="<?= htmlspecialchars($p['brand']??'') ?>" data-generic="<?= htmlspecialchars($p['generic_name']??'') ?>" data-barcode="<?= htmlspecialchars($p['barcode']??'') ?>" data-dosage="<?= htmlspecialchars($p['dosage_form']??'') ?>" data-strength="<?= htmlspecialchars($p['strength']??'') ?>" data-mfr="<?= htmlspecialchars($p['manufacturer']??'') ?>" data-category="<?= htmlspecialchars($p['category_name']??'') ?>" data-price="<?= fmt((float)$p['price']) ?>" data-pack="<?= htmlspecialchars($p['pack_size']??'') ?>" data-unit="<?= htmlspecialchars($p['unit_of_measure']??'') ?>" data-country="<?= htmlspecialchars($p['country_of_origin']??'') ?>" data-storage="<?= htmlspecialchars($p['storage_condition']??'') ?>" data-desc="<?= htmlspecialchars($p['description']??'') ?>" data-image="<?= $imgFull ?>" data-mfg="<?= htmlspecialchars($p['manufacturing_date']??'') ?>" data-rx="<?= (int)($p['requires_prescription']??0) ?>" data-wp="<?= $wp > 0 ? fmt($wp) : '' ?>" data-avail="<?= $stock <= 0 ? 0 : 1 ?>" data-lowstock="<?= ($catShowInternal && $stock > 0 && $stock <= 10) ? 1 : 0 ?>" data-batches="<?= buildBatchJson($batchMap,$pid) ?>">
         <div class="cat-card-top">
             <?php if ($isCustomerUser): ?>
             <form method="post" onclick="event.stopPropagation()" style="display:inline"><?= csrf_field() ?><input type="hidden" name="_fav" value="1"><input type="hidden" name="product_id" value="<?= $pid ?>"><button type="submit" class="cat-card-fav <?= $isFav?'active':'' ?>" title="<?= $isFav?'Remove from favorites':'Add to favorites' ?>"><i class="fas fa-heart"></i></button></form>
@@ -432,7 +439,7 @@ $tabFrequentIds = array_column($frequentlyOrdered, 'id');
             <?php if (!empty($p['image_path']) && file_exists(__DIR__.'/../uploads/products/'.$p['image_path'])): ?><img src="<?= PRODUCT_UPLOAD_URL.'/'.htmlspecialchars($p['image_path']) ?>" alt=""><?php else: ?><span class="no-img"><i class="fas fa-pills"></i></span><?php endif; ?>
             <div class="cat-card-badge">
                 <span class="cat-badge <?= $sb[1] ?>"><i class="fas <?= $sb[2] ?>"></i> <?= $sb[0] ?></span>
-                <?php if ($expSoon): ?><span class="cat-badge exp"><i class="fas fa-hourglass-half"></i> Exp <?= date('M Y', strtotime($earliest)) ?></span><?php endif; ?>
+                <?php if ($catShowInternal && $expSoon): ?><span class="cat-badge exp"><i class="fas fa-hourglass-half"></i> Exp <?= date('M Y', strtotime($earliest)) ?></span><?php endif; ?>
                 <?php if ($isFrq): ?><span class="cat-badge freq"><i class="fas fa-fire"></i> Popular</span><?php endif; ?>
                 <?php if (!empty($p['requires_prescription'])): ?><span class="cat-badge rx"><i class="fas fa-prescription"></i> Rx</span><?php endif; ?>
             </div>
@@ -440,33 +447,33 @@ $tabFrequentIds = array_column($frequentlyOrdered, 'id');
         </div>
         <div class="cat-card-body">
             <h3 class="cat-card-name"><?= htmlspecialchars($p['name']) ?></h3>
-            <p class="cat-card-sub"><?= htmlspecialchars(($p['brand']??'').($p['brand']&&$p['generic_name']?' — ':'').($p['generic_name']??'')) ?></p>
+            <p class="cat-card-sub"><?= htmlspecialchars(($p['generic_name'] ?? '') ?: ($p['brand'] ?? '')) ?></p>
             <dl class="cat-card-details">
-                <?php if ($p['dosage_form']): ?><dt>Form</dt><dd><?= htmlspecialchars($p['dosage_form']) ?></dd><?php endif; ?>
                 <?php if ($p['strength']): ?><dt>Strength</dt><dd><?= htmlspecialchars($p['strength']) ?></dd><?php endif; ?>
-                <?php if ($p['pack_size']): ?><dt>Pack</dt><dd><?= htmlspecialchars($p['pack_size']) ?></dd><?php endif; ?>
-                <?php if ($p['manufacturer']): ?><dt>Mfr</dt><dd><?= htmlspecialchars($p['manufacturer']) ?></dd><?php endif; ?>
+                <?php if ($p['dosage_form']): ?><dt>Dosage Form</dt><dd><?= htmlspecialchars($p['dosage_form']) ?></dd><?php endif; ?>
                 <?php if ($p['category_name']): ?><dt>Category</dt><dd><?= htmlspecialchars($p['category_name']) ?></dd><?php endif; ?>
+                <?php if ($p['manufacturer']): ?><dt>Manufacturer</dt><dd><?= htmlspecialchars($p['manufacturer']) ?></dd><?php endif; ?>
+                <?php if ($p['pack_size']): ?><dt>Pack Size</dt><dd><?= htmlspecialchars($p['pack_size']) ?></dd><?php endif; ?>
             </dl>
             <?php if ($p['country_of_origin']): ?><div class="cat-card-origin"><?= countryFlag($p['country_of_origin']) ?> <?= htmlspecialchars($p['country_of_origin']) ?></div><?php endif; ?>
-            <div class="cat-stock">
-                <div class="cat-stock-top">
-                    <span class="cat-<?= $sb[1] ?>"><i class="fas <?= $sb[2] ?>"></i> <?= $sb[0] ?></span>
-                </div>
-                <div class="cat-stockbar"><div class="cat-stockfill" style="width:<?= $pct ?>%;background:<?= $sb[1]==='in'?'var(--cat-ok)':($sb[1]==='low'?'var(--cat-warn)':'var(--cat-bad)') ?>"></div></div>
+            <div class="cat-stock" style="border-top:none;padding-top:4px;margin-top:6px">
+                <span class="cat-badge <?= $sb[1] ?>"><i class="fas <?= $sb[2] ?>"></i> <?= $sb[0] ?></span>
             </div>
         </div>
-        <div class="cat-card-footer">
-            <div class="cat-card-price"><?= fmt((float)$p['price']) ?></div>
-            <?php if ($isCustomerUser): ?>
-            <?php if ($stock <= 0): ?>
-            <button class="cat-card-order" disabled onclick="event.stopPropagation()" title="Out of stock"><i class="fas fa-times-circle"></i> Out of Stock</button>
-            <?php else: ?>
-            <a class="cat-card-order" href="index.php?page=place_order&product_id=<?= $pid ?>" onclick="event.stopPropagation()"><i class="fas fa-cart-plus"></i> Order</a>
-            <?php endif; ?>
-            <?php else: ?>
-            <a class="cat-card-order login" href="index.php?page=login" onclick="event.stopPropagation()"><i class="fas fa-sign-in-alt"></i> Sign In</a>
-            <?php endif; ?>
+        <div class="cat-card-footer" style="flex-direction:column;align-items:stretch;gap:8px">
+            <div class="cat-card-price" style="text-align:left"><?= fmt((float)$p['price']) ?></div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+                <button type="button" class="cat-card-order ghost" onclick="event.stopPropagation();showCatDetail(this.closest('.cat-card'))" style="justify-content:center"><i class="fas fa-eye"></i> View Details</button>
+                <?php if ($isCustomerUser): ?>
+                <?php if ($stock <= 0): ?>
+                <button class="cat-card-order" disabled onclick="event.stopPropagation()" title="Out of stock" style="justify-content:center"><i class="fas fa-times-circle"></i> Out of Stock</button>
+                <?php else: ?>
+                <a class="cat-card-order" href="index.php?page=place_order&product_id=<?= $pid ?>" onclick="event.stopPropagation()" style="justify-content:center"><i class="fas fa-cart-plus"></i> Add to Order</a>
+                <?php endif; ?>
+                <?php else: ?>
+                <a class="cat-card-order login" href="index.php?page=login" onclick="event.stopPropagation()" style="justify-content:center"><i class="fas fa-sign-in-alt"></i> Sign In</a>
+                <?php endif; ?>
+            </div>
         </div>
     </div>
     <?php endforeach; ?>
@@ -491,49 +498,62 @@ $tabFrequentIds = array_column($frequentlyOrdered, 'id');
             <div id="pdDesc" style="display:none"><p style="font-size:0.88rem;color:#475569;line-height:1.6;margin:0 0 12px" id="pdDescText"></p></div>
             <div class="pd-grid" id="pdGrid"></div>
             <div id="pdStorage" class="pd-section" style="display:none"><div class="pd-section-title"><i class="fas fa-thermometer-half"></i> Storage</div><p style="font-size:0.85rem;color:#475569;margin:0" id="pdStorageText"></p></div>
-            <div id="pdBatches" class="pd-section" style="display:none"><div class="pd-section-title"><i class="fas fa-layer-group"></i> Available Batches</div><div id="pdBatchList"></div></div>
-            <div class="pd-section"><div class="pd-section-title"><i class="fas fa-box"></i> Stock Level</div><div id="pdStockBar"></div></div>
+            <?php if ($catShowInternal): ?><div id="pdBatches" class="pd-section" style="display:none"><div class="pd-section-title"><i class="fas fa-layer-group"></i> Available Batches</div><div id="pdBatchList"></div></div><?php endif; ?>
+            <div class="pd-section"><div class="pd-section-title"><i class="fas fa-box"></i> Availability</div><div id="pdStockBar"></div></div>
         </div>
-        <div class="pd-footer">
-            <span id="pdPrice" style="font-size:1.2rem;font-weight:800;color:#1e293b"></span>
-            <a id="pdOrderBtn" href="#" class="cat-card-order" style="padding:10px 24px;font-size:0.9rem"><i class="fas fa-cart-plus"></i> Order Now</a>
+        <div class="pd-footer" style="flex-wrap:wrap;gap:10px">
+            <div>
+                <span id="pdPrice" style="font-size:1.2rem;font-weight:800;color:#1e293b"></span>
+                <span id="pdWp" style="display:none;font-size:0.78rem;color:#2563eb;font-weight:600;margin-left:8px"></span>
+            </div>
+            <a id="pdOrderBtn" href="#" class="cat-card-order" style="padding:10px 24px;font-size:0.9rem"><i class="fas fa-cart-plus"></i> Add to Order</a>
         </div>
     </div>
 </div>
 
 <script>
+var CAT_INTERNAL = <?= $catShowInternal ? 'true' : 'false' ?>;
 function catQuickView(e){e.stopPropagation();var c=e.currentTarget.closest('.cat-card');if(c)showCatDetail(c)}
 function showCatDetail(el){
+    if(!el||!el.dataset)return;
     var o=document.getElementById('pdOverlay');
     document.getElementById('pdName').textContent=el.dataset.name||'';
-    document.getElementById('pdSub').textContent=[el.dataset.brand,el.dataset.generic].filter(Boolean).join(' — ');
+    document.getElementById('pdSub').textContent=[el.dataset.generic,el.dataset.brand].filter(Boolean).join(' — ');
     document.getElementById('pdSku').textContent=el.dataset.barcode?'SKU: '+el.dataset.barcode:'';
     document.getElementById('pdPrice').textContent=el.dataset.price||'';
+    var wp=document.getElementById('pdWp');
+    if(el.dataset.wp){wp.textContent='Wholesale (pickup): '+el.dataset.wp;wp.style.display='inline'}else{wp.style.display='none'}
     var img=document.getElementById('pdImg');
     if(el.dataset.image){img.innerHTML='<img src="'+el.dataset.image+'" alt="">'}else{img.innerHTML='<span class="no-img"><i class="fas fa-pills"></i></span>'}
     var dd=document.getElementById('pdDesc');if(el.dataset.desc){document.getElementById('pdDescText').textContent=el.dataset.desc;dd.style.display='block'}else{dd.style.display='none'}
     var st=document.getElementById('pdStorage');if(el.dataset.storage){document.getElementById('pdStorageText').textContent=el.dataset.storage;st.style.display='block'}else{st.style.display='none'}
     var fields=[];
-    if(el.dataset.dosage)fields.push(['Dosage Form',el.dataset.dosage]);
     if(el.dataset.strength)fields.push(['Strength',el.dataset.strength]);
+    if(el.dataset.dosage)fields.push(['Dosage Form',el.dataset.dosage]);
     if(el.dataset.pack)fields.push(['Pack Size',el.dataset.pack]);
     if(el.dataset.unit)fields.push(['Unit',el.dataset.unit]);
     if(el.dataset.mfr)fields.push(['Manufacturer',el.dataset.mfr]);
     if(el.dataset.country)fields.push(['Origin',el.dataset.country]);
     if(el.dataset.category)fields.push(['Category',el.dataset.category]);
     if(el.dataset.mfg)fields.push(['Mfg Date',el.dataset.mfg]);
-    var stock=parseInt(el.dataset.stock)||0;
-    var sl=stock<=0?'Out of Stock':stock<=10?'Low Stock':'In Stock';
-    var sc=stock<=0?'#dc2626':stock<=10?'#d97706':'#16a34a';
-    fields.push(['Stock',sl]);
     if(el.dataset.rx==='1')fields.push(['Prescription','Required']);
     document.getElementById('pdGrid').innerHTML=fields.map(function(f){return '<div class="pd-field"><dt>'+f[0]+'</dt><dd>'+f[1]+'</dd></div>'}).join('');
-    try{var batches=JSON.parse(el.dataset.batches||'[]');var bl=document.getElementById('pdBatchList');var bd=document.getElementById('pdBatches');
-    if(batches.length>0){bl.innerHTML=batches.map(function(b){var exp=new Date(b.expiry);var now=new Date();var mo=(exp.getFullYear()-now.getFullYear())*12+(exp.getMonth()-now.getMonth());var c=mo<=3?'color:#dc2626;background:#fef2f2':mo<=6?'color:#d97706;background:#fffbeb':'color:#475569;background:#f8fafc';return '<div class="pd-batch"><span style="font-weight:600">'+b.batch+'</span><span style="padding:2px 8px;border-radius:6px;font-weight:600;font-size:0.78rem;'+c+'">Exp: '+b.expiry+'</span></div>'}).join('');bd.style.display='block'}else{bd.style.display='none'}}catch(e){document.getElementById('pdBatches').style.display='none'}
-    var pct=Math.min(100,stock>0?Math.min(stock/50*100,100):0);
-    document.getElementById('pdStockBar').innerHTML='<div style="display:flex;justify-content:space-between;font-size:0.78rem;margin-bottom:4px"><span style="font-weight:600;color:'+sc+'">'+sl+'</span></div><div class="pd-stock-bar"><div class="pd-stock-fill" style="width:'+pct+'%;background:'+sc+'"></div></div>';
+    var avail=String(el.dataset.avail)==='1';
+    var bd=document.getElementById('pdBatches');
+    if(CAT_INTERNAL&&bd){
+        try{var batches=JSON.parse(el.dataset.batches||'[]');var bl=document.getElementById('pdBatchList');
+        if(batches.length>0){bl.innerHTML=batches.map(function(b){var exp=new Date(b.expiry);var now=new Date();var mo=(exp.getFullYear()-now.getFullYear())*12+(exp.getMonth()-now.getMonth());var c=mo<=3?'color:#dc2626;background:#fef2f2':mo<=6?'color:#d97706;background:#fffbeb':'color:#475569;background:#f8fafc';return '<div class="pd-batch"><span style="font-weight:600">'+b.batch+'</span><span style="padding:2px 8px;border-radius:6px;font-weight:600;font-size:0.78rem;'+c+'">Exp: '+b.expiry+'</span></div>'}).join('');bd.style.display='block'}else{bd.style.display='none'}}catch(e){bd.style.display='none'}
+    } else if(bd){bd.style.display='none'}
+    var sbEl=document.getElementById('pdStockBar');
+    if(!avail){
+        sbEl.innerHTML='<span class="cat-badge out" style="font-size:0.8rem;padding:6px 14px"><i class="fas fa-times-circle"></i> OUT OF STOCK</span>';
+    }else if(CAT_INTERNAL&&String(el.dataset.lowstock)==='1'){
+        sbEl.innerHTML='<span class="cat-badge low" style="font-size:0.8rem;padding:6px 14px"><i class="fas fa-exclamation-triangle"></i> LOW STOCK</span>';
+    }else{
+        sbEl.innerHTML='<span class="cat-badge in" style="font-size:0.8rem;padding:6px 14px"><i class="fas fa-check-circle"></i> IN STOCK</span>';
+    }
     var btn=document.getElementById('pdOrderBtn');
-    <?php if ($isCustomerUser): ?>if(stock<=0){btn.href='#';btn.setAttribute('disabled','disabled');btn.innerHTML='<i class="fas fa-times-circle"></i> Out of Stock'}else{btn.removeAttribute('disabled');btn.href='index.php?page=place_order&product_id='+el.dataset.pid;btn.innerHTML='<i class="fas fa-cart-plus"></i> Order Now'}btn.style.display='';
+    <?php if ($isCustomerUser): ?>if(!avail){btn.href='#';btn.setAttribute('disabled','disabled');btn.innerHTML='<i class="fas fa-times-circle"></i> Out of Stock'}else{btn.removeAttribute('disabled');btn.href='index.php?page=place_order&product_id='+el.dataset.pid;btn.innerHTML='<i class="fas fa-cart-plus"></i> Add to Order'}btn.style.display='';
     <?php else: ?>btn.href='index.php?page=login';btn.style.display='';<?php endif; ?>
     o.style.display='flex';
     if(window.history&&window.history.replaceState){window.history.replaceState({},'',window.location.pathname+'?page=catalog&view_product='+el.dataset.pid)}

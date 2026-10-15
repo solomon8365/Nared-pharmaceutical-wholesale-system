@@ -1,5 +1,10 @@
 <?php
-requirePermission('credit_reports', 'view');
+// Finance officers reach this from their sidebar and hold credit_management
+// (not credit_reports). Accept either grant, matching the Customer Ledger
+// page (pages/ledger.php) which already treats the two as equivalent.
+if (!hasPermission('credit_reports', 'view') && !hasPermission('credit_management', 'view')) {
+    requirePermission('credit_reports', 'view');
+}
 require_once __DIR__ . '/../includes/finance_helpers.php';
 $pdo = finGetDb();
 

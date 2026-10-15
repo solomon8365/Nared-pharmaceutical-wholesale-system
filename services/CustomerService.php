@@ -20,24 +20,53 @@ class CustomerService
         if ($name === '') {
             throw new ServiceException('Customer name is required.');
         }
-        $stmt = $pdo->prepare('INSERT INTO customers (name, customer_type, license_number, tin_number, contact_person, phone, email, physical_address, credit_limit, payment_terms, customer_status, registered_by, created_at) VALUES (:name, :ctype, :lic, :tin, :contact, :phone, :email, :addr, :cl, :pt, :cstatus, :reg, NOW())');
-        $stmt->execute([
-            'name' => $name,
-            'ctype' => !empty($d['customer_type']) ? $d['customer_type'] : null,
-            'lic' => !empty($d['license_number']) ? trim($d['license_number']) : null,
-            'tin' => !empty($d['tin_number']) ? trim($d['tin_number']) : null,
-            'contact' => trim($d['contact'] ?? ''),
-            'phone' => trim($d['phone'] ?? ''),
-            'email' => trim($d['email'] ?? ''),
-            'addr' => trim($d['physical_address'] ?? ''),
-            'cl' => (float) ($d['credit_limit'] ?? 0),
-            'pt' => !empty($d['payment_terms']) ? trim($d['payment_terms']) : null,
-            'cstatus' => $d['customer_status'] ?? 'active',
-            'reg' => $registeredBy,
-        ]);
+        // `customers.registered_by` references `salespeople(id)` (see
+        // sql/migration_sales_rep_features.sql), while callers pass the
+        // logged-in account's `users.id`. Translate it to the matching
+        // salesperson row, or store NULL when the account is not a salesperson.
+        $salespersonId = self::salespersonIdForUser($pdo, $registeredBy);
+        try {
+            $stmt = $pdo->prepare('INSERT INTO customers (name, customer_type, license_number, tin_number, contact_person, phone, email, physical_address, credit_limit, payment_terms, customer_status, registered_by, created_at) VALUES (:name, :ctype, :lic, :tin, :contact, :phone, :email, :addr, :cl, :pt, :cstatus, :reg, NOW())');
+            $stmt->execute([
+                'name' => $name,
+                'ctype' => !empty($d['customer_type']) ? $d['customer_type'] : null,
+                'lic' => !empty($d['license_number']) ? trim($d['license_number']) : null,
+                'tin' => !empty($d['tin_number']) ? trim($d['tin_number']) : null,
+                'contact' => trim($d['contact'] ?? ''),
+                'phone' => trim($d['phone'] ?? ''),
+                'email' => trim($d['email'] ?? ''),
+                'addr' => trim($d['physical_address'] ?? ''),
+                'cl' => (float) ($d['credit_limit'] ?? 0),
+                'pt' => !empty($d['payment_terms']) ? trim($d['payment_terms']) : null,
+                'cstatus' => $d['customer_status'] ?? 'active',
+                'reg' => $salespersonId,
+            ]);
+        } catch (PDOException $e) {
+            throw new ServiceException('Could not save the customer. Please check the details and try again.');
+        }
         $id = (int) $pdo->lastInsertId();
         AuditService::cms($pdo, $registeredBy, 'customer_created', 'customers', $id, $name);
         return $id;
+    }
+
+    /**
+     * Map a logged-in account (users.id) to its linked salesperson record.
+     * Returns null when the account is not linked to an active salesperson,
+     * which is valid because customers.registered_by is nullable.
+     */
+    private static function salespersonIdForUser(PDO $pdo, ?int $userId): ?int
+    {
+        if ($userId === null || $userId <= 0) {
+            return null;
+        }
+        try {
+            $stmt = $pdo->prepare('SELECT id FROM salespeople WHERE user_id = :uid LIMIT 1');
+            $stmt->execute(['uid' => $userId]);
+            $id = $stmt->fetchColumn();
+            return ($id === false || $id === null) ? null : (int) $id;
+        } catch (PDOException $e) {
+            return null; // legacy schemas without salespeople.user_id
+        }
     }
 
     public static function update(PDO $pdo, int $customerId, array $d, ?int $userId = null): array

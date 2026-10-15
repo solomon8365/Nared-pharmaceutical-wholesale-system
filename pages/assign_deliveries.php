@@ -9,6 +9,7 @@ $messages = [];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
     require_csrf();
+    requirePermission('assign_deliveries', 'assign_delivery');
     $orderId = (int) ($_POST['order_id'] ?? 0);
     $staffId = (int) ($_POST['delivery_staff_id'] ?? 0);
     if ($orderId > 0 && $staffId > 0) {

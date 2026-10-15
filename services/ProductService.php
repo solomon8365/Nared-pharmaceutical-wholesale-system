@@ -111,7 +111,7 @@ class ProductService
 
     public static function hasStock(PDO $pdo, int $productId, float $qty): bool
     {
-        $stmt = $pdo->prepare('SELECT COALESCE(SUM(quantity_remaining), 0) FROM product_batches WHERE product_id = :id AND quantity_remaining > 0');
+        $stmt = $pdo->prepare("SELECT COALESCE(SUM(quantity), 0) FROM product_batches WHERE product_id = :id AND quantity > 0 AND status = 'active'");
         $stmt->execute(['id' => $productId]);
         return (float) $stmt->fetchColumn() >= $qty;
     }

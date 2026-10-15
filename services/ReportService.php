@@ -15,7 +15,7 @@ class ReportService
 
     public static function salesByProduct(PDO $pdo, string $from, string $to, int $limit = 20): array
     {
-        $stmt = $pdo->prepare("SELECT p.name, SUM(si.quantity) AS qty, SUM(si.line_total) AS revenue FROM sale_items si JOIN products p ON p.id = si.product_id JOIN sales s ON s.id = si.sale_id WHERE DATE(s.sale_date) BETWEEN :from AND :to GROUP BY p.id, p.name ORDER BY revenue DESC LIMIT :lim");
+        $stmt = $pdo->prepare("SELECT p.name, SUM(si.quantity) AS qty, SUM(si.quantity * si.unit_price) AS revenue FROM sale_items si JOIN products p ON p.id = si.product_id JOIN sales s ON s.id = si.sale_id WHERE DATE(s.sale_date) BETWEEN :from AND :to GROUP BY p.id, p.name ORDER BY revenue DESC LIMIT :lim");
         $stmt->bindValue('from', $from);
         $stmt->bindValue('to', $to);
         $stmt->bindValue('lim', $limit, PDO::PARAM_INT);
@@ -35,7 +35,7 @@ class ReportService
 
     public static function paymentMethods(PDO $pdo, string $from, string $to): array
     {
-        $stmt = $pdo->prepare("SELECT payment_method, COUNT(*) AS count, SUM(amount) AS total FROM payments WHERE DATE(payment_date) BETWEEN :from AND :to GROUP BY payment_method ORDER BY total DESC");
+        $stmt = $pdo->prepare("SELECT payment_method, COUNT(*) AS count, SUM(amount) AS total FROM invoice_payments WHERE DATE(created_at) BETWEEN :from AND :to GROUP BY payment_method ORDER BY total DESC");
         $stmt->execute(['from' => $from, 'to' => $to]);
         return $stmt->fetchAll();
     }

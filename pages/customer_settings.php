@@ -1,5 +1,7 @@
 <?php
 $pdo = getPDO();
+require_once __DIR__ . '/../includes/auto_migrate.php';
+ensureCustomerSelfRegistrationMigration($pdo);
 $messages = [];
 $errors = [];
 $cid = customerAccountCustomerId();

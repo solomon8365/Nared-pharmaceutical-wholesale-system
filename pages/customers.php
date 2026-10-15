@@ -79,6 +79,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $messages[] = ['type' => 'success', 'text' => 'Customer added successfully.'];
         } catch (ServiceException $e) {
             $messages[] = ['type' => 'error', 'text' => $e->getMessage()];
+        } catch (Throwable $e) {
+            $messages[] = ['type' => 'error', 'text' => 'Could not add the customer. Please check the details and try again.'];
         }
     }
 }

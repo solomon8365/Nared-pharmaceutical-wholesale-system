@@ -12,6 +12,7 @@ $userId = (int)(currentUser()['id'] ?? 0);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     require_csrf();
+    requirePermission('assign_deliveries', 'assign_delivery');
     $act = $_POST['action'];
 
     if ($act === 'assign_single') {

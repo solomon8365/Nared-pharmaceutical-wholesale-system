@@ -172,7 +172,7 @@ class OrderService
 
         $pdo->beginTransaction();
         try {
-            $stmt = $pdo->prepare("INSERT INTO customer_orders (customer_id, placed_by_user_id, order_date, status, total_amount, discount_amount, vat_amount, payment_method, agreement_version_id, agreement_accepted_at, payment_detail, transaction_ref, bank_name, account_name, account_number, merchant_name, merchant_id, payment_screenshot, delivery_address, fulfillment_method, created_at) VALUES (:cid, :uid, :od, :st, :total, :disc, :vat, :pm, :agv, :aga, :pd, :tr, :bn, :an, :acn, :mn, :mid, :ss, :da, :fm, NOW())");
+            $stmt = $pdo->prepare("INSERT INTO customer_orders (customer_id, placed_by_user_id, order_date, status, total_amount, discount_amount, vat_amount, payment_method, agreement_version_id, agreement_accepted_at, payment_detail, transaction_ref, bank_name, account_name, account_number, merchant_name, merchant_id, payment_screenshot, delivery_address, order_notes, fulfillment_method, created_at) VALUES (:cid, :uid, :od, :st, :total, :disc, :vat, :pm, :agv, :aga, :pd, :tr, :bn, :an, :acn, :mn, :mid, :ss, :da, :on, :fm, NOW())");
             $stmt->execute([
                 'st' => $orderStatus, 'cid' => $customerId, 'uid' => $uid, 'od' => $orderDate,
                 'total' => $grandTotal, 'disc' => $built['totalDiscount'], 'vat' => $built['vat'],
@@ -186,6 +186,7 @@ class OrderService
                 'mid' => !empty($data['merchant_id']) ? $data['merchant_id'] : null,
                 'ss' => $paymentScreenshotPath,
                 'da' => !empty($data['delivery_address']) ? $data['delivery_address'] : null,
+                'on' => !empty($data['order_notes']) ? substr((string) $data['order_notes'], 0, 2000) : null,
                 'fm' => $fulfillmentMethod,
             ]);
             $orderId = (int) $pdo->lastInsertId();
@@ -290,7 +291,7 @@ class OrderService
             $screenshotPath = $paymentScreenshotPath !== null ? $paymentScreenshotPath : $existing['payment_screenshot'];
 
             $orderDate = $data['order_date'] ?? date('Y-m-d');
-            $stmt = $pdo->prepare("UPDATE customer_orders SET order_date = :od, total_amount = :total, discount_amount = :disc, vat_amount = :vat, payment_method = :pm, agreement_version_id = :agv, agreement_accepted_at = :aga, payment_detail = :pd, transaction_ref = :tr, bank_name = :bn, account_name = :an, account_number = :acn, merchant_name = :mn, merchant_id = :mid, payment_screenshot = :ss, delivery_address = :da, fulfillment_method = :fm WHERE id = :id");
+            $stmt = $pdo->prepare("UPDATE customer_orders SET order_date = :od, total_amount = :total, discount_amount = :disc, vat_amount = :vat, payment_method = :pm, agreement_version_id = :agv, agreement_accepted_at = :aga, payment_detail = :pd, transaction_ref = :tr, bank_name = :bn, account_name = :an, account_number = :acn, merchant_name = :mn, merchant_id = :mid, payment_screenshot = :ss, delivery_address = :da, order_notes = :on, fulfillment_method = :fm WHERE id = :id");
             $stmt->execute([
                 'od' => $orderDate, 'total' => $grandTotal, 'disc' => $built['totalDiscount'], 'vat' => $built['vat'],
                 'pm' => $paymentMethod, 'agv' => $agreementVersionId, 'aga' => $agreementAcceptedAt,
@@ -302,6 +303,7 @@ class OrderService
                 'mn' => !empty($data['merchant_name']) ? $data['merchant_name'] : null,
                 'mid' => !empty($data['merchant_id']) ? $data['merchant_id'] : null,
                 'ss' => $screenshotPath, 'da' => !empty($data['delivery_address']) ? $data['delivery_address'] : null,
+                'on' => !empty($data['order_notes']) ? substr((string) $data['order_notes'], 0, 2000) : null,
                 'fm' => $fulfillmentMethod,
                 'id' => $editingOrderId,
             ]);
@@ -553,9 +555,12 @@ class OrderService
             throw new ServiceException('Please provide payment details / transaction reference for the selected payment method.');
         }
 
-        // Non-credit salesperson orders must carry an uploaded payment photo
+        // Non-credit salesperson orders normally carry an uploaded payment photo
         // (bank slip, mobile-money screenshot, cash receipt) resolved by the caller.
-        if ($paymentMethod !== 'credit' && trim((string) ($data['payment_photo_path'] ?? '')) === '') {
+        // Back-office registrations on a customer's behalf may opt out with
+        // require_payment_photo = false (no receipt collected yet).
+        $requirePaymentPhoto = (bool) ($data['require_payment_photo'] ?? true);
+        if ($requirePaymentPhoto && $paymentMethod !== 'credit' && trim((string) ($data['payment_photo_path'] ?? '')) === '') {
             throw new ServiceException('A payment photo is required for non-credit orders. Please upload the payment receipt image.');
         }
 

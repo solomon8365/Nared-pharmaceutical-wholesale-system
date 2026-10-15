@@ -2,6 +2,7 @@
 require_once __DIR__ . '/../includes/finance_helpers.php';
 ensureFinanceErpMigration(finGetDb());
 $pdo = finGetDb();
+requireFinanceOfficer();
 $user = currentUser();
 $uid = (int) ($user['id'] ?? 0);
 $username = $user['username'] ?? 'system';

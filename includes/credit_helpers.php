@@ -471,12 +471,15 @@ function creditApplyLateCharges(PDO $pdo): int {
         if ($daysLate <= $grace) continue;
         $bal = (float) $inv['outstanding_balance'];
         $charged = 0.0;
+        $penaltyAmt = 0.0;
+        $interestAmt = 0.0;
 
         // One-time late fee once past grace
         if ($penaltyPct > 0 && empty($inv['penalty_applied_at'])) {
             $penalty = round($bal * $penaltyPct / 100, 2);
             if ($penalty > 0) {
                 $charged += $penalty;
+                $penaltyAmt = $penalty;
                 $bal += $penalty; // interest below accrues on the balance including the late fee
                 $pdo->prepare('UPDATE invoices SET outstanding_balance = :bal, penalty_amount = penalty_amount + :p, penalty_applied_at = CURDATE() WHERE id = :id')
                     ->execute(['bal' => $bal, 'p' => $penalty, 'id' => $inv['id']]);
@@ -497,6 +500,7 @@ function creditApplyLateCharges(PDO $pdo): int {
                     $next = (clone $start)->modify('+' . $months . ' months');
                     $next = $next > new DateTime() ? new DateTime() : $next;
                     $charged += $interest;
+                    $interestAmt = $interest;
                     $pdo->prepare('UPDATE invoices SET outstanding_balance = outstanding_balance + :i, interest_last_applied_at = :last WHERE id = :id')
                         ->execute(['i' => $interest, 'last' => $next->format('Y-m-d'), 'id' => $inv['id']]);
                 }
@@ -504,12 +508,67 @@ function creditApplyLateCharges(PDO $pdo): int {
         }
 
         if ($charged > 0) {
+            creditPostLateChargeJournal($pdo, (int) $inv['id'], $penaltyAmt, $interestAmt);
             creditLogAudit($pdo, (int) $inv['customer_id'], 'late_charges_applied', null,
                 json_encode(['invoice_id' => (int) $inv['id'], 'amount' => $charged, 'days_late' => $daysLate]), null);
             $applied++;
         }
     }
     return $applied;
+}
+
+/**
+ * Post a draft journal entry for late charges applied to an invoice:
+ *   Debit  Accounts Receivable (1100) - increases the customer's balance
+ *   Credit Late-payment penalty income (4400)
+ *   Credit Interest income (4300)
+ * Best-effort: never throws into the caller's charge loop, so a journal
+ * problem cannot undo the (already persisted) balance increase.
+ */
+function creditPostLateChargeJournal(PDO $pdo, int $invoiceId, float $penalty, float $interest): void
+{
+    $amount = round($penalty + $interest, 2);
+    if ($amount <= 0) return;
+    try {
+        require_once __DIR__ . '/finance_helpers.php';
+        if (!function_exists('finGenerateEntryNumber')) return;
+
+        $accountId = function (string $code) use ($pdo): int {
+            $st = $pdo->prepare('SELECT id FROM chart_of_accounts WHERE account_code = ? LIMIT 1');
+            $st->execute([$code]);
+            return (int) $st->fetchColumn();
+        };
+        $ar = $accountId('1100');   // Accounts Receivable
+        $pen = $accountId('4400');  // Other income - late payment penalty
+        $int = $accountId('4300');  // Interest income
+        if ($ar <= 0 || ($pen <= 0 && $int <= 0)) return;
+        if ($pen <= 0) $pen = $int;
+        if ($int <= 0) $int = $pen;
+
+        $currency = class_exists('SettingsService') ? SettingsService::get('currency', 'ETB') : 'ETB';
+        if ($currency === '') $currency = 'ETB';
+        $date = date('Y-m-d');
+        $number = finGenerateEntryNumber($pdo, $date);
+
+        $ins = $pdo->prepare('INSERT INTO journal_entries (entry_date, entry_number, description, reference_type, reference_id, status, total_debit, total_credit, created_by, currency, exchange_rate, base_amount, created_at) VALUES (?, ?, ?, ?, ?, "draft", ?, ?, NULL, ?, 1.0000, ?, NOW())');
+        $inserted = false;
+        for ($attempt = 1; $attempt <= 5 && !$inserted; $attempt++) {
+            try {
+                $ins->execute([$date, $number, 'Credit late charges - invoice #' . $invoiceId, 'invoice_late_charge', $invoiceId, $amount, $amount, $currency, $amount]);
+                $inserted = true;
+            } catch (PDOException $e) {
+                if ((int) ($e->errorInfo[1] ?? 0) !== 1062 || $attempt === 5) throw $e;
+                $number = finGenerateEntryNumber($pdo, $date);
+            }
+        }
+        $jid = (int) $pdo->lastInsertId();
+        $line = $pdo->prepare('INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit, credit, description) VALUES (?, ?, ?, ?, ?)');
+        $line->execute([$jid, $ar, $amount, 0, 'Late charges - invoice #' . $invoiceId]);
+        if ($penalty > 0) $line->execute([$jid, $pen, 0, round($penalty, 2), 'Late payment penalty - invoice #' . $invoiceId]);
+        if ($interest > 0) $line->execute([$jid, $int, 0, round($interest, 2), 'Monthly interest - invoice #' . $invoiceId]);
+    } catch (Throwable $e) {
+        // Best-effort: the balance increase is the source of truth.
+    }
 }
 
 /**

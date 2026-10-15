@@ -140,7 +140,7 @@ if ($activeTab === 'daily_sales'):
         SELECT co.id, co.created_at, co.total_amount, co.payment_method, co.payment_confirmed, c.name AS customer_name
         FROM customer_orders co
         LEFT JOIN customers c ON co.customer_id = c.id
-        WHERE DATE(co.created_at) = CURDATE() AND co.status != 'cancelled'
+        WHERE DATE(co.created_at) = CURDATE() AND co.status NOT IN ('cancelled','rejected')
         ORDER BY co.created_at DESC
     ");
     $dailySales->execute();
@@ -237,7 +237,7 @@ if ($activeTab === 'daily_sales'):
     $msRows = $pdo->prepare("
         SELECT DATE(co.created_at) AS sale_date, co.total_amount, co.payment_method, co.payment_confirmed
         FROM customer_orders co
-        WHERE co.created_at BETWEEN :df AND :dt AND co.status != 'cancelled'
+        WHERE co.created_at BETWEEN :df AND :dt AND co.status NOT IN ('cancelled','rejected')
         ORDER BY sale_date ASC
     ");
     $msRows->execute(['df' => $dateFrom . ' 00:00:00', 'dt' => $dateTo . ' 23:59:59']);
@@ -317,7 +317,7 @@ if ($activeTab === 'daily_sales'):
     </div>
 
 <?php elseif ($activeTab === 'profit'):
-    $profRev = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status != 'cancelled'");
+    $profRev = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status NOT IN ('cancelled','rejected')");
     $profRev->execute(['df' => $dateFrom . ' 00:00:00', 'dt' => $dateTo . ' 23:59:59']);
     $totalRevenue = (float) $profRev->fetchColumn();
 
@@ -773,7 +773,7 @@ if ($activeTab === 'daily_sales'):
     <?php endif; ?>
 
 <?php elseif ($activeTab === 'tax'):
-    $taxRev = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status != 'cancelled'");
+    $taxRev = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status NOT IN ('cancelled','rejected')");
     $taxRev->execute(['df' => $dateFrom . ' 00:00:00', 'dt' => $dateTo . ' 23:59:59']);
     $taxRevenue = (float) $taxRev->fetchColumn();
     $taxAmount = $taxRevenue * ($vatRate / 100);
@@ -781,7 +781,7 @@ if ($activeTab === 'daily_sales'):
     $taxDaily = $pdo->prepare("
         SELECT DATE(created_at) AS d, COALESCE(SUM(total_amount), 0) AS day_total
         FROM customer_orders
-        WHERE created_at BETWEEN :df AND :dt AND status != 'cancelled'
+        WHERE created_at BETWEEN :df AND :dt AND status NOT IN ('cancelled','rejected')
         GROUP BY d ORDER BY d ASC
     ");
     $taxDaily->execute(['df' => $dateFrom . ' 00:00:00', 'dt' => $dateTo . ' 23:59:59']);
@@ -822,7 +822,7 @@ if ($activeTab === 'daily_sales'):
     <?php endif; ?>
 
 <?php elseif ($activeTab === 'vat'):
-    $vatOutRev = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status != 'cancelled'");
+    $vatOutRev = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status NOT IN ('cancelled','rejected')");
     $vatOutRev->execute(['df' => $dateFrom . ' 00:00:00', 'dt' => $dateTo . ' 23:59:59']);
     $outputRevenue = (float) $vatOutRev->fetchColumn();
     $outputVAT = $outputRevenue * ($vatRate / 100);
@@ -928,11 +928,11 @@ if ($activeTab === 'daily_sales'):
     arsort($crCustomers);
     $crCustomers = array_slice($crCustomers, 0, 10, true);
 
-    $crTotalSales = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status != 'cancelled' AND payment_method = 'credit'");
+    $crTotalSales = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status NOT IN ('cancelled','rejected') AND payment_method = 'credit'");
     $crTotalSales->execute(['df' => $dateFrom . ' 00:00:00', 'dt' => $dateTo . ' 23:59:59']);
     $crCreditSalesTotal = (float) $crTotalSales->fetchColumn();
 
-    $crAllSales = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status != 'cancelled'");
+    $crAllSales = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status NOT IN ('cancelled','rejected')");
     $crAllSales->execute(['df' => $dateFrom . ' 00:00:00', 'dt' => $dateTo . ' 23:59:59']);
     $crAllSalesTotal = (float) $crAllSales->fetchColumn();
 ?>
@@ -1094,7 +1094,7 @@ if ($activeTab === 'daily_sales'):
     $refTotal = 0; $refCount = count($refData);
     foreach ($refData as $r) { $refTotal += (float) $r['amount']; }
 
-    $refSales = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status != 'cancelled'");
+    $refSales = $pdo->prepare("SELECT COALESCE(SUM(total_amount), 0) FROM customer_orders WHERE created_at BETWEEN :df AND :dt AND status NOT IN ('cancelled','rejected')");
     $refSales->execute(['df' => $dateFrom . ' 00:00:00', 'dt' => $dateTo . ' 23:59:59']);
     $periodSales = (float) $refSales->fetchColumn();
     $refundRate = $periodSales > 0 ? ($refTotal / $periodSales) * 100 : 0;

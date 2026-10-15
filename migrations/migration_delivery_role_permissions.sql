@@ -59,3 +59,18 @@ WHERE NOT EXISTS (SELECT 1 FROM `role_permissions` rp WHERE rp.`role_id` = 3 AND
 INSERT INTO `role_permissions` (`role_id`, `module`, `permission`)
 SELECT 3, 'delivery_management', 'view'
 WHERE NOT EXISTS (SELECT 1 FROM `role_permissions` rp WHERE rp.`role_id` = 3 AND rp.`module` = 'delivery_management' AND rp.`permission` = 'view');
+
+-- `view` is required by the page guards (requirePermission($module, 'view')) on
+-- Driver Management, Assign Driver and Delivery Tracking. Without it the
+-- delivery operator passed every action check yet could never open the screen.
+INSERT INTO `role_permissions` (`role_id`, `module`, `permission`)
+SELECT 3, 'delivery_staff', 'view'
+WHERE NOT EXISTS (SELECT 1 FROM `role_permissions` rp WHERE rp.`role_id` = 3 AND rp.`module` = 'delivery_staff' AND rp.`permission` = 'view');
+
+INSERT INTO `role_permissions` (`role_id`, `module`, `permission`)
+SELECT 3, 'assign_deliveries', 'view'
+WHERE NOT EXISTS (SELECT 1 FROM `role_permissions` rp WHERE rp.`role_id` = 3 AND rp.`module` = 'assign_deliveries' AND rp.`permission` = 'view');
+
+INSERT INTO `role_permissions` (`role_id`, `module`, `permission`)
+SELECT 3, 'delivery_tracking', 'view'
+WHERE NOT EXISTS (SELECT 1 FROM `role_permissions` rp WHERE rp.`role_id` = 3 AND rp.`module` = 'delivery_tracking' AND rp.`permission` = 'view');

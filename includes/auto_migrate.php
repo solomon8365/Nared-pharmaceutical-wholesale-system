@@ -268,6 +268,9 @@ function ensureOrderWorkflowMigration($pdo)
          SET @s=IF(@e=0,'ALTER TABLE customer_orders ADD COLUMN discount_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER total_amount','SELECT 1'); PREPARE p FROM @s; EXECUTE p; DEALLOCATE PREPARE p",
         "SET @e=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='customer_orders' AND COLUMN_NAME='vat_amount');
          SET @s=IF(@e=0,'ALTER TABLE customer_orders ADD COLUMN vat_amount DECIMAL(12,2) NOT NULL DEFAULT 0.00 AFTER discount_amount','SELECT 1'); PREPARE p FROM @s; EXECUTE p; DEALLOCATE PREPARE p",
+        // customer_orders: customer-supplied order notes (B2B instructions, delivery notes)
+        "SET @e=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='customer_orders' AND COLUMN_NAME='order_notes');
+         SET @s=IF(@e=0,'ALTER TABLE customer_orders ADD COLUMN order_notes TEXT NULL AFTER delivery_address','SELECT 1'); PREPARE p FROM @s; EXECUTE p; DEALLOCATE PREPARE p",
         "SET @e=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='customers' AND COLUMN_NAME='credit_terms_days');
          SET @s=IF(@e=0,'ALTER TABLE customers ADD COLUMN credit_terms_days INT NOT NULL DEFAULT 30 AFTER credit_used','SELECT 1'); PREPARE p FROM @s; EXECUTE p; DEALLOCATE PREPARE p",
         "SET @e=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='customers' AND COLUMN_NAME='is_credit_approved');
@@ -357,6 +360,10 @@ function ensureFulfillmentMigration($pdo)
          SET @s=IF(@e=0,'ALTER TABLE customer_orders ADD COLUMN reserved_quantity INT UNSIGNED NOT NULL DEFAULT 0 AFTER prepared_at','SELECT 1'); PREPARE p FROM @s; EXECUTE p; DEALLOCATE PREPARE p",
         "SET @e=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='customer_orders' AND COLUMN_NAME='reserved_status');
          SET @s=IF(@e=0,'ALTER TABLE customer_orders ADD COLUMN reserved_status VARCHAR(20) NULL AFTER reserved_quantity','SELECT 1'); PREPARE p FROM @s; EXECUTE p; DEALLOCATE PREPARE p",
+        // JSON blob holding the order timeline. Records the FEFO batch allocation
+        // (per-batch picks) written at Pack time; read back on the fulfillment page.
+        "SET @e=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='customer_orders' AND COLUMN_NAME='timeline_data');
+         SET @s=IF(@e=0,'ALTER TABLE customer_orders ADD COLUMN timeline_data LONGTEXT NULL AFTER reserved_status','SELECT 1'); PREPARE p FROM @s; EXECUTE p; DEALLOCATE PREPARE p",
         // stock_movements: record which batch (and warehouse) a movement belongs to,
         // so FEFO batch usage for fulfillment is auditable per-batch.
         "SET @e=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='stock_movements' AND COLUMN_NAME='batch_id');
@@ -631,6 +638,56 @@ function ensureInvoicePaymentsMigration($pdo)
 }
 
 /**
+ * Auto-run migration for customer-submitted invoice payments.
+ *
+ * Customers may submit a payment (cash / bank transfer / mobile money) with
+ * supporting evidence against an outstanding invoice. These submissions stay
+ * PENDING until a Finance officer verifies them; only then is a row written to
+ * the invoice_payments ledger via recordInvoicePayment(). This keeps unverified
+ * claims out of the financial ledger (no bypassing Finance verification).
+ */
+function ensureCustomerPaymentSubmissionMigration($pdo)
+{
+    static $done = false;
+    if ($done) return;
+    $done = true;
+
+    ensureInvoicePaymentsMigration($pdo);
+
+    $sql = "CREATE TABLE IF NOT EXISTS customer_payment_submissions (
+        id                INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        customer_id       INT UNSIGNED NOT NULL,
+        invoice_id        INT UNSIGNED NULL,
+        amount            DECIMAL(12,2) NOT NULL,
+        payment_method    VARCHAR(50) NOT NULL,
+        reference_no      VARCHAR(100) NULL,
+        receipt_path      VARCHAR(255) NULL,
+        notes             TEXT NULL,
+        status            ENUM('pending','verified','rejected','cancelled') NOT NULL DEFAULT 'pending',
+        reviewed_by       INT UNSIGNED NULL,
+        reviewed_at       DATETIME NULL,
+        rejection_reason  TEXT NULL,
+        invoice_payment_id INT UNSIGNED NULL,
+        created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE,
+        INDEX idx_cps_customer (customer_id),
+        INDEX idx_cps_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+    try { $pdo->exec($sql); } catch (Exception $e) { /* ignore */ }
+
+    // Soft-cancel support: make sure 'cancelled' is part of the enum even on
+    // tables created before this state existed (idempotent, non-destructive).
+    try {
+        $colType = $pdo->query("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='customer_payment_submissions' AND COLUMN_NAME='status'")->fetchColumn();
+        if ($colType !== false && strpos((string) $colType, "'cancelled'") === false) {
+            $pdo->exec("ALTER TABLE customer_payment_submissions MODIFY COLUMN status ENUM('pending','verified','rejected','cancelled') NOT NULL DEFAULT 'pending'");
+        }
+    } catch (Exception $e) { /* ignore */ }
+}
+
+/**
  * Auto-run migration for supplier codes (mirrors customers.customer_code).
  */
 function ensureSupplierCodeMigration($pdo)
@@ -804,6 +861,9 @@ function ensureCustomerSelfRegistrationMigration($pdo)
     $custCols = [
         'license_number' => 'VARCHAR(100) NULL DEFAULT NULL',
         'tin_number'     => 'VARCHAR(100) NULL DEFAULT NULL',
+        // Customer profile notification preferences (pages/customer_settings.php).
+        'notify_email'   => 'TINYINT(1) NOT NULL DEFAULT 1',
+        'notify_sms'     => 'TINYINT(1) NOT NULL DEFAULT 0',
     ];
     foreach ($custCols as $col => $def) {
         $sql = "SET @e=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='customers' AND COLUMN_NAME='{$col}');"
@@ -957,4 +1017,254 @@ function ensureSuperAdminRoleMigration(PDO $pdo): void
             }
         }
     } catch (Exception $e) { /* never block the request on this migration */ }
+}
+
+/**
+ * Purchase Order payment approval capability for the Finance Officer.
+ *
+ * pages/purchase_payment_approval.php, header.php and
+ * canProcessPurchasePayment() all gate on the `purchase_payment_approval`
+ * module (declared on the Roles page), but no role ever held it — so the
+ * Finance Officer was locked out of the payment-approval screen and the
+ * sidebar link never rendered. Grant the module to the Finance Officer role
+ * only; the strict PO separation-of-duties helpers keep the Super Admin and
+ * Manager out of the payment step regardless of any other grant. The Finance
+ * Officer also needs read access to the PO list to reconcile what they pay.
+ *
+ * Fully additive (INSERT IGNORE); existing permissions are never removed.
+ */
+function ensurePurchasePaymentApprovalMigration(PDO $pdo): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+
+    try {
+        $find = $pdo->prepare('SELECT id FROM roles WHERE LOWER(name) = ? ORDER BY id LIMIT 1');
+        $find->execute(['finance officer']);
+        $financeId = ($row = $find->fetch()) ? (int) $row['id'] : null;
+        if (!$financeId || $financeId === 1) {
+            return;
+        }
+
+        $ins = $pdo->prepare('INSERT IGNORE INTO role_permissions (role_id, module, permission) VALUES (?, ?, ?)');
+        $changed = 0;
+        // supplier_payments: the Finance sidebar links to this page unconditionally
+        // and its approve buttons are gated by requirePoCapability('payment'), but
+        // the page itself calls requirePermission('supplier_payments','view') — so
+        // without this row the Finance Officer's own menu link bounced to the
+        // dashboard.
+        foreach ([['purchase_payment_approval', 'view'], ['purchase_payment_approval', 'approve'], ['purchase_orders', 'view'], ['supplier_payments', 'view']] as [$module, $permission]) {
+            $ins->execute([$financeId, $module, $permission]);
+            $changed += $ins->rowCount();
+        }
+
+        // Invalidate any cached permission sets so an already signed-in
+        // Finance Officer picks the new capability up without re-login.
+        if ($changed > 0 && function_exists('bumpPermVersion')) {
+            bumpPermVersion();
+        }
+    } catch (Exception $e) { /* never block the request on this migration */ }
+}
+
+/**
+ * Order-lifecycle role capabilities that the shipped permission rows omitted.
+ *
+ * Two workflow roles could not open the pages they own:
+ *   - Store Manager had no `order_fulfillment` rows at all, so the
+ *     "Order Fulfillment" page (stock check + pack) that index.php routes
+ *     them to and the sidebar advertises bounced to "Permission Not Allowed".
+ *   - Delivery Staff held `assign_deliveries`/`delivery_tracking`/`delivery_staff`
+ *     action permissions but not `view`, while every one of those pages guards
+ *     on requirePermission($module, 'view'). The delivery operator (the only
+ *     role admitted by requireDeliveryOperator) was therefore locked out of
+ *     Assign Driver, Delivery Tracking and Driver Management.
+ *
+ * Fully additive (INSERT IGNORE) and idempotent; existing grants are never
+ * removed. Called from loginForPortal() so the capability is present before
+ * the role's first navigation.
+ */
+function ensureOrderWorkflowRolePermissions(PDO $pdo): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+
+    try {
+        $roleId = static function (PDO $pdo, string $name): ?int {
+            $st = $pdo->prepare('SELECT id FROM roles WHERE LOWER(TRIM(name)) = ? ORDER BY id LIMIT 1');
+            $st->execute([mb_strtolower(trim($name))]);
+            $id = $st->fetchColumn();
+            return $id === false ? null : (int) $id;
+        };
+
+        $targets = [];
+        $storeId = $roleId($pdo, 'Store Manager');
+        if ($storeId !== null && $storeId !== 1) {
+            $targets[$storeId] = [
+                // index.php/auth.php route the role to store_dashboard on login
+                // and the sidebar links there unconditionally, yet the role had
+                // no store_dashboard row at all.
+                ['store_dashboard', 'view'],
+                ['order_fulfillment', 'view'],
+                ['order_fulfillment', 'edit'],
+            ];
+        }
+        $deliveryId = $pdo->query("SELECT id FROM roles WHERE LOWER(TRIM(name)) = 'delivery staff' ORDER BY id LIMIT 1")->fetchColumn();
+        $deliveryId = $deliveryId !== false ? (int) $deliveryId : null;
+        if ($deliveryId && $deliveryId !== 1) {
+            $targets[$deliveryId] = [
+                ['assign_deliveries', 'view'],
+                ['delivery_tracking', 'view'],
+                ['delivery_staff', 'view'],
+            ];
+        }
+
+        $ins = $pdo->prepare('INSERT IGNORE INTO role_permissions (role_id, module, permission) VALUES (?, ?, ?)');
+        $changed = 0;
+        foreach ($targets as $roleId => $grants) {
+            foreach ($grants as [$module, $permission]) {
+                $ins->execute([$roleId, $module, $permission]);
+                $changed += $ins->rowCount();
+            }
+        }
+
+        if ($changed > 0 && function_exists('bumpPermVersion')) {
+            bumpPermVersion();
+        }
+    } catch (Exception $e) { /* never block the request on this migration */ }
+}
+
+/**
+ * Grants invoice 'view' to every role so any role can open pages/invoice.php
+ * (which calls requirePermission('invoice', 'view')) and see the "Sales
+ * Invoices" sidebar link. Idempotent: relies on the uq_role_module_perm
+ * unique key, and only bumps the permission version when rows were added.
+ */
+function ensureInvoiceViewAllRoles(PDO $pdo): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+
+    try {
+        $ins = $pdo->prepare("INSERT IGNORE INTO role_permissions (role_id, module, permission) SELECT id, 'invoice', 'view' FROM roles");
+        $ins->execute();
+        if ($ins->rowCount() > 0 && function_exists('bumpPermVersion')) {
+            bumpPermVersion();
+        }
+    } catch (Exception $e) { /* never block the request on this migration */ }
+}
+
+/**
+ * Creates core workflow tables that pages already reference but which were
+ * never shipped with the schema: departments, customer_favorites,
+ * support_tickets and bank_reconciliation_items. All statements are
+ * CREATE TABLE IF NOT EXISTS, so this is fully non-destructive and preserves
+ * every existing record.
+ */
+function ensureCoreWorkflowTablesMigration(PDO $pdo): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+
+    $sqls = [];
+
+    // Staff departments (pages/departments.php)
+    $sqls[] = "CREATE TABLE IF NOT EXISTS departments (
+        id INT(10) UNSIGNED NOT NULL AUTO_INCREMENT,
+        name VARCHAR(120) NOT NULL,
+        description VARCHAR(255) NULL,
+        status ENUM('active','inactive') NOT NULL DEFAULT 'active',
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uniq_department_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+    // Customer product favourites (pages/catalog.php → INSERT IGNORE)
+    $sqls[] = "CREATE TABLE IF NOT EXISTS customer_favorites (
+        id INT(10) UNSIGNED NOT NULL AUTO_INCREMENT,
+        customer_id INT(10) UNSIGNED NOT NULL,
+        product_id INT(10) UNSIGNED NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uniq_customer_product (customer_id, product_id),
+        KEY idx_fav_customer (customer_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+    // Customer support tickets (pages/help_center.php)
+    $sqls[] = "CREATE TABLE IF NOT EXISTS support_tickets (
+        id INT(10) UNSIGNED NOT NULL AUTO_INCREMENT,
+        customer_id INT(10) UNSIGNED NULL,
+        user_id INT(10) UNSIGNED NULL,
+        type VARCHAR(50) NOT NULL DEFAULT 'general',
+        subject VARCHAR(200) NOT NULL,
+        message TEXT NOT NULL,
+        priority ENUM('low','medium','high') NOT NULL DEFAULT 'medium',
+        status ENUM('open','in_progress','resolved','closed') NOT NULL DEFAULT 'open',
+        admin_reply TEXT NULL,
+        replied_by INT(10) UNSIGNED NULL,
+        replied_at DATETIME NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_ticket_customer (customer_id),
+        KEY idx_ticket_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+    // Bank reconciliation line items (pages/finance_bank.php)
+    $sqls[] = "CREATE TABLE IF NOT EXISTS bank_reconciliation_items (
+        id INT(10) UNSIGNED NOT NULL AUTO_INCREMENT,
+        reconciliation_id INT(10) UNSIGNED NOT NULL,
+        transaction_id INT(10) UNSIGNED NULL,
+        match_type VARCHAR(30) NOT NULL DEFAULT 'manual',
+        is_matched TINYINT(1) NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_recon (reconciliation_id),
+        KEY idx_recon_txn (transaction_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+    foreach ($sqls as $sql) {
+        try { $pdo->exec($sql); } catch (Exception $e) { /* never block the request */ }
+    }
+
+    // physical_counts.status gained 'reversed' (used by pages/physical_count.php
+    // to undo a completed count). Add it to existing installs.
+    try {
+        $ct = $pdo->query("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'physical_counts' AND COLUMN_NAME = 'status'")->fetchColumn();
+        if ($ct !== false && strpos((string) $ct, "'reversed'") === false) {
+            $pdo->exec("ALTER TABLE physical_counts MODIFY COLUMN status ENUM('draft','completed','cancelled','reversed') NOT NULL DEFAULT 'draft'");
+        }
+    } catch (Exception $e) { /* never block the request */ }
+
+    // invoices.status gained 'cancelled' (WorkflowService::cancelOrderForRefund
+    // voids the auto-generated invoice). Add it to existing installs.
+    try {
+        $ict = $pdo->query("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'invoices' AND COLUMN_NAME = 'status'")->fetchColumn();
+        if ($ict !== false && strpos((string) $ict, "'cancelled'") === false) {
+            $pdo->exec("ALTER TABLE invoices MODIFY COLUMN status ENUM('pending','completed','cancelled') NOT NULL DEFAULT 'pending'");
+        }
+    } catch (Exception $e) { /* never block the request */ }
+
+    // supplier_payments.order_id must reference purchase_orders(id) (the real
+    // procurement ledger), not the legacy orders table. Repoint if necessary.
+    try {
+        $fk = $pdo->prepare("SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'supplier_payments' AND COLUMN_NAME = 'order_id' AND REFERENCED_TABLE_NAME IS NOT NULL LIMIT 1");
+        $fk->execute();
+        $fkRow = $fk->fetch();
+        if ($fkRow && $fkRow['REFERENCED_TABLE_NAME'] === 'orders') {
+            $name = $fkRow['CONSTRAINT_NAME'];
+            $pdo->exec("ALTER TABLE supplier_payments DROP FOREIGN KEY `$name`");
+            $pdo->exec("ALTER TABLE supplier_payments ADD CONSTRAINT fk_supplier_payments_po FOREIGN KEY (order_id) REFERENCES purchase_orders(id) ON DELETE CASCADE");
+        }
+    } catch (Exception $e) { /* never block the request */ }
 }

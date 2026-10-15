@@ -14,6 +14,7 @@ $typeFilter = trim($_GET['type'] ?? '');
 $statusFilter = trim($_GET['status'] ?? '');
 $search = trim($_GET['q'] ?? '');
 $export = $_GET['export'] ?? '';
+if ($export !== '') { requirePermission('reports', 'export'); }
 $perPage = 25;
 $wrPage = max(1, (int)($_GET['pg'] ?? 1));
 

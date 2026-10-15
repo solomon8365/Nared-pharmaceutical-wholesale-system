@@ -6,6 +6,7 @@ $messages = [];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     require_csrf();
+    requirePermission('sales_returns', 'create');
     $action = $_POST['action'] ?? '';
 
     if ($action === 'create') {
@@ -47,9 +48,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     foreach ($validItems as $vi) {
                         $ins->execute(['rid' => $returnId, 'pid' => $vi['product_id'], 'qty' => $vi['quantity'], 'up' => $vi['unit_price'], 'bid' => $vi['batch_id'] > 0 ? $vi['batch_id'] : null, 'r' => $vi['reason'] ?: null]);
                         if ($vi['batch_id'] > 0) {
+                            $bchk = $pdo->prepare('SELECT product_id FROM product_batches WHERE id = :id FOR UPDATE');
+                            $bchk->execute(['id' => $vi['batch_id']]);
+                            $brow = $bchk->fetch();
+                            if (!$brow || (int) $brow['product_id'] !== (int) $vi['product_id']) {
+                                throw new RuntimeException('Selected batch does not belong to the product.');
+                            }
                             $pdo->prepare('UPDATE product_batches SET quantity = quantity + :qty WHERE id = :id')->execute(['qty' => $vi['quantity'], 'id' => $vi['batch_id']]);
                             recalc_product_stock($pdo, $vi['product_id']);
                         } else {
+                            // A batch-tracked product must be returned against a batch,
+                            // otherwise products.stock_quantity would silently desync.
+                            if (has_batches($pdo, $vi['product_id'])) {
+                                throw new RuntimeException('This product is batch-tracked — select a batch to return.');
+                            }
                             $pdo->prepare('UPDATE products SET stock_quantity = stock_quantity + :qty WHERE id = :id')->execute(['qty' => $vi['quantity'], 'id' => $vi['product_id']]);
                         }
                         log_stock_movement($pdo, $vi['product_id'], $vi['quantity'], 'Sales Return', 'sales_return', $returnId);
@@ -85,7 +97,7 @@ $returns = $pdo->query("SELECT sr.*, c.name AS customer_name, s.id AS sale_id FR
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="create">
                     <label>Sale
-                        <select name="sale_id" required>
+                        <select name="sale_id" id="sr-sale" required>
                             <option value="">— Select sale —</option>
                             <?php foreach ($sales as $s): ?>
                                 <option value="<?= (int) $s['id'] ?>">#<?= (int) $s['id'] ?> — <?= htmlspecialchars($s['customer_name']) ?> (<?= htmlspecialchars($s['sale_date']) ?>)</option>
@@ -150,19 +162,66 @@ $returns = $pdo->query("SELECT sr.*, c.name AS customer_name, s.id AS sale_id FR
     </div>
 </section>
 <script>
+function loadSrBatches(row) {
+    var prodSel = row.querySelector('select[name^="items["][name$="[product_id]"]');
+    var batchSel = row.querySelector('select[name^="items["][name$="[batch_id]"]');
+    if (!prodSel || !batchSel) return;
+    batchSel.innerHTML = '<option value="">Batch</option>';
+    var pid = prodSel.value;
+    if (!pid) return;
+    fetch('ajax_get_batches.php?product_id=' + encodeURIComponent(pid))
+        .then(function(r){ return r.json(); })
+        .then(function(data){
+            data.forEach(function(b){
+                var o = document.createElement('option');
+                o.value = b.id;
+                o.textContent = b.batch_number + ' (Exp: ' + b.expiry_date + ', Qty: ' + b.quantity + ')';
+                batchSel.appendChild(o);
+            });
+        })
+        .catch(function(){});
+}
+function bindSrRow(row) {
+    var prodSel = row.querySelector('select[name^="items["][name$="[product_id]"]');
+    if (prodSel) {
+        prodSel.onchange = function() {
+            var opt = this.options[this.selectedIndex];
+            var priceInput = row.querySelector('input[name^="items["][name$="[unit_price]"]');
+            if (opt && opt.dataset.price !== undefined && priceInput && (priceInput.value === '' || priceInput.value === '0')) {
+                priceInput.value = opt.dataset.price;
+            }
+            loadSrBatches(row);
+        };
+    }
+    var rm = row.querySelector('.remove-item');
+    if (rm) { rm.onclick = function(){ this.closest('.order-item-row').remove(); }; }
+}
+document.getElementById('sr-sale').addEventListener('change', function() {
+    var saleId = this.value;
+    if (!saleId) return;
+    $.getJSON('ajax_get_sale_items.php?sale_id=' + saleId, function(data) {
+        document.querySelectorAll('#sr-items .order-item-row').forEach(function(row) {
+            var sel = row.querySelector('select[name^="items["][name$="[product_id]"]');
+            if (sel) {
+                sel.innerHTML = '<option value="">— Select product —</option>';
+                data.forEach(function(item) {
+                    sel.innerHTML += '<option value="' + item.product_id + '" data-price="' + item.unit_price + '">' + item.product_name + ' (' + item.quantity_sold + ' sold)</option>';
+                });
+            }
+            var batchSel = row.querySelector('select[name^="items["][name$="[batch_id]"]');
+            if (batchSel) batchSel.innerHTML = '<option value="">Batch</option>';
+        });
+    });
+});
 document.getElementById('add-sr-item').addEventListener('click', function() {
     var container = document.getElementById('sr-items');
     var idx = container.querySelectorAll('.order-item-row').length;
     var row = document.createElement('div');
     row.className = 'order-item-row';
+    row.style.flexWrap = 'wrap';
     row.innerHTML = '<select name="items[' + idx + '][product_id]" required style="min-width:140px"><option value="">— Select product —</option></select><input type="number" name="items[' + idx + '][quantity]" value="1" min="1" required style="width:90px;min-width:70px" placeholder="Qty"><input type="number" name="items[' + idx + '][unit_price]" step="0.01" value="0" style="width:110px;min-width:90px" placeholder="Price"><select name="items[' + idx + '][batch_id]" style="max-width:140px;min-width:100px"><option value="">Batch</option></select><input type="text" name="items[' + idx + '][reason]" placeholder="Reason" style="flex:1;min-width:100px"><button type="button" class="remove-item">Remove</button>';
     container.appendChild(row);
-    attachRemoveEvents();
+    bindSrRow(row);
 });
-function attachRemoveEvents() {
-    document.querySelectorAll('#sr-items .remove-item').forEach(function(btn) {
-        btn.onclick = function() { this.closest('.order-item-row').remove(); };
-    });
-}
-attachRemoveEvents();
+document.querySelectorAll('#sr-items .order-item-row').forEach(bindSrRow);
 </script>

@@ -19,6 +19,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (isset($_POST['save_salesperson'])) {
         $id = (int) ($_POST['id'] ?? 0);
+        requirePermission('salespeople', $id > 0 ? 'edit' : 'create');
         $name = trim($_POST['name'] ?? '');
         $phone = trim($_POST['phone'] ?? '');
         $email = trim($_POST['email'] ?? '');
@@ -42,11 +43,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
     if (isset($_POST['delete_salesperson'])) {
+        requirePermission('salespeople', 'delete');
         $id = (int) ($_POST['id'] ?? 0);
         if ($id > 0) { $pdo->prepare('DELETE FROM salespeople WHERE id=:id')->execute(['id'=>$id]); $messages[]=['type'=>'success','text'=>'Salesperson deleted.']; }
     }
     if (isset($_POST['save_territory'])) {
         $id = (int) ($_POST['id'] ?? 0);
+        requirePermission('salespeople', $id > 0 ? 'edit' : 'create');
         $tName = trim($_POST['name'] ?? '');
         $description = trim($_POST['description'] ?? '');
         $region = trim($_POST['region'] ?? '');
@@ -62,6 +65,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
     if (isset($_POST['delete_territory'])) {
+        requirePermission('salespeople', 'delete');
         $id = (int) ($_POST['id'] ?? 0);
         if ($id > 0) { $pdo->prepare('DELETE FROM territories WHERE id=:id')->execute(['id'=>$id]); $messages[]=['type'=>'success','text'=>'Territory deleted.']; }
     }
@@ -131,37 +135,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             foreach ($items as $item) { $pid=(int)($item['product_id']??0); $qty=(int)($item['quantity']??0); if($pid>0&&$qty>0) $lineTotals[]=['product_id'=>$pid,'quantity'=>$qty]; }
             if (empty($lineTotals)) { $errors[] = 'Add at least one product with quantity.'; }
             else {
-                $pdo->beginTransaction();
                 try {
-                    $priceByProduct=[];
-                    foreach($lineTotals as $line){ $stmt=$pdo->prepare('SELECT price, wholesale_price FROM products WHERE id=:id'); $stmt->execute(['id'=>$line['product_id']]); $row=$stmt->fetch(); if($row===false) throw new RuntimeException('Invalid product.'); $unit=(float)$row['price']; if($fulfillmentMethod==='pickup' && (float)$row['wholesale_price']>0){ $unit=(float)$row['wholesale_price']; } $priceByProduct[$line['product_id']]=$unit; }
-                    $total=0; foreach($lineTotals as $line) $total+=$priceByProduct[$line['product_id']]*$line['quantity'];
-                    $adminUser=$pdo->query("SELECT id FROM users WHERE role='admin' ORDER BY id ASC LIMIT 1")->fetchColumn();
-                    $pdo->prepare("INSERT INTO customer_orders (customer_id,placed_by_user_id,salesperson_id,order_date,status,total_amount,payment_method,payment_detail,delivery_address,fulfillment_method,approval_stage,created_at) VALUES (:cid,:uid,:spid,:od,'pending',:total,'bank','Registered by sales rep',:da,:fm,'admin',NOW())")
-                        ->execute(['cid'=>$customerId,'uid'=>$adminUser,'spid'=>$salespersonId>0?$salespersonId:null,'od'=>$orderDate,'total'=>$total,'da'=>$deliveryAddress?:null,'fm'=>$fulfillmentMethod]);
-                    $orderId=(int)$pdo->lastInsertId();
-                    $ins=$pdo->prepare('INSERT INTO customer_order_items (customer_order_id,product_id,quantity,unit_price) VALUES (:oid,:pid,:qty,:price)');
-                    foreach($lineTotals as $line) $ins->execute(['oid'=>$orderId,'pid'=>$line['product_id'],'qty'=>$line['quantity'],'price'=>$priceByProduct[$line['product_id']]]);
-                    $pdo->commit();
-                    $messages[]=['type'=>'success','text'=>'Order #'.$orderId.' created.'];
+                    $res = OrderService::createSalespersonOrder($pdo, [
+                        'customer_id'       => $customerId,
+                        'salesperson_id'    => $salespersonId,
+                        'placed_by_user_id' => (int) (currentUser()['id'] ?? 0),
+                        'sale_date'         => $orderDate,
+                        'payment_method'    => 'bank',
+                        'payment_detail'    => 'Registered by sales rep',
+                        'delivery_address'  => $deliveryAddress,
+                        'fulfillment_method'=> $fulfillmentMethod,
+                        'sale_items'        => $lineTotals,
+                        'require_payment_photo' => false,
+                    ]);
+                    $messages[] = ['type' => 'success', 'text' => 'Order #' . (int) $res['order_id'] . ' created and submitted for approval.'];
                     $activeTab = 'visits';
-                } catch (Exception $e) { $pdo->rollBack(); $errors[]=$e->getMessage(); }
+                } catch (Exception $e) { $errors[] = $e->getMessage(); }
             }
         }
     }
     if (isset($_POST['approve_commission'])) {
+        requirePermission('commissions', 'approve');
         $commId=(int)($_POST['commission_id']??0);
         if($commId>0){ $ok=CommissionService::approve($pdo,$commId,currentUser()['id']); $messages[]=['type'=>$ok?'success':'error','text'=>$ok?'Commission approved.':'Commission not found or already processed.']; }
     }
     if (isset($_POST['reject_commission'])) {
+        requirePermission('commissions', 'approve');
         $commId=(int)($_POST['commission_id']??0); $reason=trim($_POST['rejection_reason']??'');
         if($commId>0){ CommissionService::reject($pdo,$commId,currentUser()['id'],$reason?:null); $messages[]=['type'=>'success','text'=>'Commission rejected.']; }
     }
     if (isset($_POST['pay_commission'])) {
+        requirePermission('commissions', 'pay');
         $commId=(int)($_POST['commission_id']??0);
         if($commId>0){ $ok=CommissionService::pay($pdo,$commId,currentUser()['id']); $messages[]=['type'=>$ok?'success':'error','text'=>$ok?'Commission marked as paid.':'Commission not found or not approved.']; }
     }
     if (isset($_POST['batch_action'])) {
+        requirePermission('commissions', ($_POST['batch_action'] ?? '') === 'pay' ? 'pay' : 'approve');
         $batchAct=$_POST['batch_action']; $ids=array_map('intval',$_POST['comm_ids']??[]);
         if(!empty($ids)){
             if($batchAct==='approve'){ $messages[]=['type'=>'success','text'=>CommissionService::approveMany($pdo,$ids,currentUser()['id']).' commission(s) approved.']; }

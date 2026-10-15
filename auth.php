@@ -8,10 +8,21 @@ ini_set('session.cookie_httponly', '1');
 if ($secure) {
     ini_set('session.cookie_secure', '1');
 }
+// Fix domain: remove port for cookie domain (RFC 6265)
+$host = $_SERVER['HTTP_HOST'] ?? '';
+$cookieDomain = '';
+if ($host !== '') {
+    $hostParts = explode(':', $host);
+    $cookieDomain = $hostParts[0]; // hostname only, no port
+    // Don't set domain for localhost/IP - let browser handle it
+    if ($cookieDomain === 'localhost' || filter_var($cookieDomain, FILTER_VALIDATE_IP)) {
+        $cookieDomain = '';
+    }
+}
 session_set_cookie_params([
     'lifetime' => 0,
     'path' => '/',
-    'domain' => $_SERVER['HTTP_HOST'] ?? '',
+    'domain' => $cookieDomain,
     'secure' => $secure,
     'httponly' => true,
     'samesite' => 'Lax',
@@ -196,8 +207,14 @@ function requireLogin(): void
 function userRole(): string
 {
     $u = currentUser();
-
-    return $u['role'] ?? 'admin';
+    if (!is_array($u)) {
+        return '';
+    }
+    // Never assume 'admin' when the role is missing/invalid — that would let a
+    // session without a role slip into the administration tier. Return an empty
+    // role instead so all is*() checks evaluate to false.
+    $role = $u['role'] ?? '';
+    return is_string($role) ? $role : '';
 }
 
 /**
@@ -268,6 +285,28 @@ function requireAdmin(): void
     if (!isAdmin()) {
         if (headers_sent()) {
             echo '<div style="padding:30px;text-align:center;font-family:sans-serif"><h2 style="color:#dc2626">Access Denied</h2><p style="color:#374151;margin:12px 0">Admin access required.</p><a href="index.php?page=dashboard" style="display:inline-block;padding:10px 24px;background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Back to Dashboard</a></div>';
+            exit;
+        }
+        header('Location: index.php?page=dashboard');
+        exit;
+    }
+}
+
+/**
+ * Super Admin guard: only the root account (role_id 1 with the 'admin' enum
+ * value) may pass. This is the hard server-side gate for the Super Admin
+ * module — it does NOT accept the generic Admin/Manager tier.
+ */
+function requireSuperAdmin(): void
+{
+    if (!currentUser()) {
+        if (headers_sent()) { echo '<script>location.href="index.php?page=login"</script>'; exit; }
+        header('Location: index.php?page=login');
+        exit;
+    }
+    if (!isSuperAdmin()) {
+        if (headers_sent()) {
+            echo '<div style="padding:30px;text-align:center;font-family:sans-serif"><h2 style="color:#dc2626">Access Denied</h2><p style="color:#374151;margin:12px 0">Super Admin access required.</p><a href="index.php?page=dashboard" style="display:inline-block;padding:10px 24px;background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Back to Dashboard</a></div>';
             exit;
         }
         header('Location: index.php?page=dashboard');
@@ -434,13 +473,44 @@ function poRoleIdByName(string $name): ?int
 }
 
 function poStoreManagerRoleId(): ?int { return poRoleIdByName('Store manager'); }
-function poAdminRoleId(): ?int { return poRoleIdByName('Admin'); }
 function poFinanceRoleId(): ?int { return poRoleIdByName('Finance Officer'); }
+
+/**
+ * The administration tier for the PO workflow.
+ *
+ * The legacy single "Admin" role was split into "Super Admin" (role 1, the
+ * root account) and "Manager" (role 7, day-to-day operations). Resolving the
+ * literal name "Admin" therefore returns null — the role no longer exists —
+ * which silently evaluated every `$rid === poAdminRoleId()` comparison to
+ * false and disabled PO approval (and hid the Purchase Orders menu) for the
+ * Super Admin and Manager alike. Resolve the whole tier instead.
+ *
+ * @return int[] Existing administration role ids (Super Admin, Manager).
+ */
+function poAdminRoleIds(): array
+{
+    $ids = [poRoleIdByName('Super Admin'), poRoleIdByName('Manager')];
+    return array_values(array_filter($ids, static fn ($id) => $id !== null));
+}
+
+/** Primary administration role id (Super Admin), or null if unavailable. */
+function poAdminRoleId(): ?int
+{
+    $ids = poAdminRoleIds();
+    return $ids[0] ?? null;
+}
 
 function canViewPurchaseOrder(): bool
 {
     $rid = getUserRoleId();
-    return $rid !== null && in_array($rid, [poAdminRoleId(), poStoreManagerRoleId(), poFinanceRoleId()], true) && hasPermission('purchase_orders', 'view');
+    if ($rid === null) {
+        return false;
+    }
+    $allowed = array_filter(array_merge(
+        poAdminRoleIds(),
+        [poStoreManagerRoleId(), poFinanceRoleId()]
+    ), static fn ($id) => $id !== null);
+    return in_array($rid, $allowed, true) && hasPermission('purchase_orders', 'view');
 }
 
 function canCreatePurchaseOrder(): bool
@@ -469,7 +539,9 @@ function canCancelPurchaseOrder(): bool
 function canApprovePurchaseOrder(): bool
 {
     $rid = getUserRoleId();
-    return $rid === poAdminRoleId() && hasPermission('purchase_orders', 'approve');
+    return $rid !== null
+        && in_array($rid, poAdminRoleIds(), true)
+        && hasPermission('purchase_orders', 'approve');
 }
 
 function canProcessPurchasePayment(): bool
@@ -528,6 +600,10 @@ function loginForPortal(string $username, string $password, ?string $portal): ?s
     ensureStoreManagerRoleMigration($pdo);
     ensureCustomerSelfRegistrationMigration($pdo);
     ensureSuperAdminRoleMigration($pdo);
+    ensurePurchasePaymentApprovalMigration($pdo);
+    ensureOrderWorkflowRolePermissions($pdo);
+    ensureInvoiceViewAllRoles($pdo);
+    ensureCoreWorkflowTablesMigration($pdo);
     $stmt = $pdo->prepare('SELECT * FROM users WHERE username = :username LIMIT 1');
     $stmt->execute(['username' => $username]);
     $user = $stmt->fetch();
@@ -670,11 +746,41 @@ function getUserRoleId(): ?int
 {
     $u = currentUser();
     if (!$u) return null;
-    if (isset($u['role_id']) && $u['role_id'] > 0) return (int) $u['role_id'];
-    // Fallback for users without role_id assigned yet
-    static $map = ['admin' => 1, 'customer' => 2, 'delivery' => 3, 'finance' => 4, 'store_manager' => 5];
-    $role = $u['role'] ?? 'admin';
-    return $map[$role] ?? null;
+    if (isset($u['role_id']) && (int) $u['role_id'] > 0) {
+        return (int) $u['role_id'];
+    }
+
+    // No trustworthy role_id in the session snapshot. Resolve it from the
+    // database by the authenticated user's id (never from client input) and
+    // cache it for this request. If the account genuinely has no valid role,
+    // return null so NO role is assumed — we must never silently fall back to
+    // an Admin/Super Admin role when the role is missing or invalid.
+    $uid = currentUserId();
+    if ($uid === null) {
+        return null;
+    }
+
+    static $resolved = [];
+    if (array_key_exists($uid, $resolved)) {
+        return $resolved[$uid];
+    }
+
+    try {
+        $pdo = getPDO();
+        $stmt = $pdo->prepare('SELECT role_id FROM users WHERE id = :id LIMIT 1');
+        $stmt->execute(['id' => $uid]);
+        $rid = $stmt->fetchColumn();
+        $resolved[$uid] = ($rid !== null && (int) $rid > 0) ? (int) $rid : null;
+    } catch (Throwable $e) {
+        $resolved[$uid] = null;
+    }
+
+    // Keep the cached session snapshot consistent for the rest of the request.
+    if ($resolved[$uid] !== null && isset($_SESSION['user']) && is_array($_SESSION['user'])) {
+        $_SESSION['user']['role_id'] = $resolved[$uid];
+    }
+
+    return $resolved[$uid];
 }
 
 function loadPermissionsForRole(int $roleId): array
@@ -860,5 +966,70 @@ function saveRolePermissions(int $roleId, array $submittedPerms, array $modules,
                 $insert->execute(['rid' => $roleId, 'mod' => $module, 'perm' => $perm]);
             }
         }
+    }
+}
+
+// =============================================================
+// Super Admin audit trail
+// =============================================================
+// Records sensitive administrative changes (user/role/settings/backup) in a
+// dedicated, non-destructive table. Created on demand with CREATE TABLE IF NOT
+// EXISTS so it never disturbs existing data.
+
+function ensureAdminAuditLog(PDO $pdo): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+    try {
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS admin_audit_log (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                user_id INT UNSIGNED NULL,
+                username VARCHAR(100) NULL,
+                action VARCHAR(100) NOT NULL,
+                entity VARCHAR(100) NULL,
+                entity_id VARCHAR(64) NULL,
+                details TEXT NULL,
+                ip_address VARCHAR(45) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_admin_audit_created (created_at),
+                KEY idx_admin_audit_user (user_id),
+                KEY idx_admin_audit_entity (entity)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
+    } catch (Throwable $e) {
+        // Table creation is best-effort; logging must never break a request.
+    }
+}
+
+/**
+ * Write an entry to the Super Admin audit trail. Never throws: a logging
+ * failure must not abort the underlying administrative operation.
+ */
+function logAdminAction(string $action, string $entity = '', $entityId = null, string $details = ''): void
+{
+    try {
+        $pdo = getPDO();
+        ensureAdminAuditLog($pdo);
+        $u = currentUser();
+        $stmt = $pdo->prepare(
+            'INSERT INTO admin_audit_log (user_id, username, action, entity, entity_id, details, ip_address, created_at)
+             VALUES (:uid, :un, :ac, :en, :eid, :de, :ip, NOW())'
+        );
+        $stmt->execute([
+            'uid' => currentUserId(),
+            'un'  => isset($u['username']) ? (string) $u['username'] : null,
+            'ac'  => $action,
+            'en'  => $entity !== '' ? $entity : null,
+            'eid' => $entityId !== null ? (string) $entityId : null,
+            'de'  => $details !== '' ? $details : null,
+            'ip'  => $_SERVER['REMOTE_ADDR'] ?? null,
+        ]);
+    } catch (Throwable $e) {
+        // ignore
     }
 }

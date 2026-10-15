@@ -56,7 +56,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $productId = (int) ($_POST['product_id'] ?? 0);
         $name = trim($_POST['name'] ?? '');
         $description = trim($_POST['description'] ?? '');
-        $stock = (int) ($_POST['stock'] ?? 0);
+        // Stock can never be negative.
+        $stock = max(0, (int) ($_POST['stock'] ?? 0));
         $purchasePrice = (float) ($_POST['purchase_price'] ?? 0);
 
         if ($productId <= 0 || $name === '') {
@@ -121,6 +122,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $ph->execute(['pid' => $productId, 'old' => $oldPrice, 'new' => $price, 'uid' => $uid]);
                 }
 
+                // For batch-tracked products the true stock is the sum of the
+                // active batches, so a manually typed figure must never
+                // overwrite it. Recompute from batches instead.
+                if (has_batches($pdo, $productId)) {
+                    recalc_product_stock($pdo, $productId);
+                }
+
                 $upload = $_FILES['image'] ?? null;
                 if ($upload && (int) ($upload['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE) {
                     $imagePath = store_product_image($upload, $productId);
@@ -140,7 +148,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         requirePermission('products', 'create');
         $name = trim($_POST['name'] ?? '');
         $description = trim($_POST['description'] ?? '');
-        $stock = (int) ($_POST['stock'] ?? 0);
+        // Stock can never be negative.
+        $stock = max(0, (int) ($_POST['stock'] ?? 0));
         $purchasePrice = (float) ($_POST['purchase_price'] ?? 0);
 
         if ($name === '' || $purchasePrice <= 0) {
@@ -343,7 +352,10 @@ if (isset($_GET['batch_data']) || isset($_GET['stock_history']) || isset($_GET['
 }
 
 function countryFlag($c) {
-    $map = ['Ethiopia'=>"\xF0\x9F\x87\xBA\xF0\x9F\x87\xBC",'India'=>"\xF0\x9F\x87\xAE\xF0\x9F\x87\xB3",'China'=>"\xF0\x9F\x87\xA8\xF0\x9F\x87\xB3",'United Kingdom'=>"\xF0\x9F\x87\xAC\xF0\x9F\x87\xA7",'USA'=>"\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8",'United States'=>"\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8",'Germany'=>"\xF0\x9F\x87\xA9\xF0\x9F\x87\xAA",'France'=>"\xF0\x9F\x87\xAB\xF0\x9F\x87\xB7",'Japan'=>"\xF0\x9F\x87\xAF\xF0\x9F\x87\xB5",'Switzerland'=>"\xF0\x9F\x87\xA8\xF0\x9F\x87\xAD",'UAE'=>"\xF0\x9F\x87\xA6\xF0\x9F\x87\xAA",'Italy'=>"\xF0\x9F\x87\xAE\xF0\x9F\x87\xB9",'Turkey'=>"\xF0\x9F\x87\xB9\xF0\x9F\x87\xB7",'Kenya'=>"\xF0\x9F\x87\xB0\xF0\x9F\x87\xAA",'Nigeria'=>"\xF0\x9F\x87\xB3\xF0\x9F\x87\xAC",'South Korea'=>"\xF0\x9F\x87\xB0\xF0\x9F\x87\xB7",'Canada'=>"\xF0\x9F\x87\xA8\xF0\x9F\x87\xA6",'Brazil'=>"\xF0\x9F\x87\xA7\xF0\x9F\x87\xB7",'Egypt'=>"\xF0\x9F\x87\xAA\xF0\x9F\x87\xBC",'Israel'=>"\xF0\x9F\x87\xAE\xF0\x9F\x87\xB1",'Pakistan'=>"\xF0\x9F\x87\xB5\xF0\x9F\x87\xB0",'Bangladesh'=>"\xF0\x9F\x87\xA7\xF0\x9F\x87\xA9",'Sri Lanka'=>"\xF0\x9F\x87\xB1\xF0\x9F\x87\xB0",'UK'=>"\xF0\x9F\x87\xAC\xF0\x9F\x87\xA7",'Korea'=>"\xF0\x9F\x87\xB0\xF0\x9F\x87\xB7"];
+    static $map = null;
+    if ($map === null) {
+        $map = ['Ethiopia'=>"\xF0\x9F\x87\xBA\xF0\x9F\x87\xBC",'India'=>"\xF0\x9F\x87\xAE\xF0\x9F\x87\xB3",'China'=>"\xF0\x9F\x87\xA8\xF0\x9F\x87\xB3",'United Kingdom'=>"\xF0\x9F\x87\xAC\xF0\x9F\x87\xA7",'USA'=>"\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8",'United States'=>"\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8",'Germany'=>"\xF0\x9F\x87\xA9\xF0\x9F\x87\xAA",'France'=>"\xF0\x9F\x87\xAB\xF0\x9F\x87\xB7",'Japan'=>"\xF0\x9F\x87\xAF\xF0\x9F\x87\xB5",'Switzerland'=>"\xF0\x9F\x87\xA8\xF0\x9F\x87\xAD",'UAE'=>"\xF0\x9F\x87\xA6\xF0\x9F\x87\xAA",'Italy'=>"\xF0\x9F\x87\xAE\xF0\x9F\x87\xB9",'Turkey'=>"\xF0\x9F\x87\xB9\xF0\x9F\x87\xB7",'Kenya'=>"\xF0\x9F\x87\xB0\xF0\x9F\x87\xAA",'Nigeria'=>"\xF0\x9F\x87\xB3\xF0\x9F\x87\xAC",'South Korea'=>"\xF0\x9F\x87\xB0\xF0\x9F\x87\xB7",'Canada'=>"\xF0\x9F\x87\xA8\xF0\x9F\x87\xA6",'Brazil'=>"\xF0\x9F\x87\xA7\xF0\x9F\x87\xB7",'Egypt'=>"\xF0\x9F\x87\xAA\xF0\x9F\x87\xBC",'Israel'=>"\xF0\x9F\x87\xAE\xF0\x9F\x87\xB1",'Pakistan'=>"\xF0\x9F\x87\xB5\xF0\x9F\x87\xB0",'Bangladesh'=>"\xF0\x9F\x87\xA7\xF0\x9F\x87\xA9",'Sri Lanka'=>"\xF0\x9F\x87\xB1\xF0\x9F\x87\xB0",'UK'=>"\xF0\x9F\x87\xAC\xF0\x9F\x87\xA7",'Korea'=>"\xF0\x9F\x87\xB0\xF0\x9F\x87\xB7"];
+    }
     $c = trim($c ?? '');
     return $map[$c] ?? '';
 }

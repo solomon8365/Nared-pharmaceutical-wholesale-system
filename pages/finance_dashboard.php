@@ -1,8 +1,10 @@
 <?php
 require_once __DIR__ . '/../includes/finance_helpers.php';
+require_once __DIR__ . '/../includes/auto_migrate.php';
 requirePermission('finance_dashboard', 'view');
 ensureFinanceErpMigration(finGetDb());
 $pdo = finGetDb();
+ensureCustomerPaymentSubmissionMigration($pdo);
 $user = currentUser();
 
 $todaySales = finGetTodaySales($pdo);
@@ -23,6 +25,26 @@ $refunds = finGetTotalRefunds($pdo);
 $grossProfit = $monthRev - $monthCOGS;
 $netProfit = $monthRev - $monthCOGS - $monthExp - $refunds;
 $pendingApprovals = finGetPendingPaymentApprovals($pdo);
+
+// Customer-submitted payments awaiting Finance verification (customer_payment_submissions)
+$pendingCustSubmissions = 0;
+$pendingCustSubmissionAmount = 0.0;
+$customerPendingSubs = [];
+try {
+    $pendingCustSubmissions = (int) $pdo->query("SELECT COUNT(*) FROM customer_payment_submissions WHERE status = 'pending'")->fetchColumn();
+    $pendingCustSubmissionAmount = (float) $pdo->query("SELECT COALESCE(SUM(amount),0) FROM customer_payment_submissions WHERE status = 'pending'")->fetchColumn();
+    $cpsStmt = $pdo->query("SELECT s.id, s.amount, s.payment_method, s.reference_no, s.created_at, s.receipt_path, c.name AS customer_name, i.invoice_no
+                            FROM customer_payment_submissions s
+                            LEFT JOIN customers c ON s.customer_id = c.id
+                            LEFT JOIN invoices i ON s.invoice_id = i.id
+                            WHERE s.status = 'pending'
+                            ORDER BY s.created_at ASC LIMIT 5");
+    $customerPendingSubs = $cpsStmt->fetchAll();
+} catch (Exception $e) {
+    $pendingCustSubmissions = 0;
+    $pendingCustSubmissionAmount = 0.0;
+    $customerPendingSubs = [];
+}
 
 $creditOutstanding = (float) $pdo->query("SELECT COALESCE(SUM(outstanding_balance),0) FROM invoices WHERE payment_status IN ('unpaid','partial')")->fetchColumn();
 $creditOverdue = (int) $pdo->query("SELECT COUNT(*) FROM invoices WHERE payment_status IN ('unpaid','partial') AND credit_due_date IS NOT NULL AND credit_due_date < CURDATE()")->fetchColumn();
@@ -46,11 +68,11 @@ for ($i = 11; $i >= 0; $i--) {
 }
 
 $recentTransactions = $pdo->query("
-    (SELECT 'payment' AS type, ip.amount, ip.created_at, c.name AS entity, ip.payment_method AS method FROM invoice_payments ip LEFT JOIN customers c ON ip.customer_id = c.id)
+    (SELECT 'payment' AS type, ip.amount, ip.created_at, c.name COLLATE utf8mb4_general_ci AS entity, ip.payment_method COLLATE utf8mb4_general_ci AS method FROM invoice_payments ip LEFT JOIN customers c ON ip.customer_id = c.id)
     UNION ALL
-    (SELECT 'expense' AS type, e.amount, e.created_at, e.expense_category AS entity, NULL AS method FROM expenses e)
+    (SELECT 'expense' AS type, e.amount, e.created_at, e.expense_category COLLATE utf8mb4_general_ci AS entity, NULL AS method FROM expenses e)
     UNION ALL
-    (SELECT 'refund' AS type, r.amount, r.created_at, r.reason AS entity, NULL AS method FROM refunds r)
+    (SELECT 'refund' AS type, r.amount, r.created_at, r.reason COLLATE utf8mb4_general_ci AS entity, NULL AS method FROM refunds r)
     ORDER BY created_at DESC LIMIT 12
 ")->fetchAll();
 
@@ -69,6 +91,15 @@ if (empty($notifications)) {
     $unreconciledCount = $pdo->query("SELECT COUNT(*) FROM bank_transactions WHERE status = 'pending'")->fetchColumn();
     if ($unreconciledCount > 0) $notifications[] = ['notification_type' => 'unreconciled', 'title' => 'Pending Bank Transactions', 'message' => "$unreconciledCount bank transaction(s) pending.", 'severity' => 'warning'];
     if ($canCredit && $creditOverdue > 0) $notifications[] = ['notification_type' => 'overdue_credit', 'title' => 'Overdue Credit', 'message' => "$creditOverdue credit invoice(s) past due, total " . currency_sym() . " " . number_format($creditOutstanding, 2) . ".", 'severity' => 'warning'];
+}
+
+if ($pendingCustSubmissions > 0) {
+    array_unshift($notifications, [
+        'notification_type' => 'customer_payment_pending',
+        'title' => 'Customer Payments Awaiting Verification',
+        'message' => $pendingCustSubmissions . ' customer payment' . ($pendingCustSubmissions === 1 ? '' : 's') . ' totalling ' . currency_sym() . ' ' . number_format($pendingCustSubmissionAmount, 2) . ' awaiting Finance approval.',
+        'severity' => 'warning',
+    ]);
 }
 
 $ch = finPctChange($todaySales, $todaySalesPrev);
@@ -105,6 +136,19 @@ $maxChartVal = max($maxRevVal, $maxExpVal);
 .fd-trans-type.refund{background:#ffedd5;color:#9a3412}
 @media(max-width:1200px){.fd-chart-wrap{grid-template-columns:1fr}}
 @media(max-width:480px){.fd-cash-flow{grid-template-columns:1fr!important}.fd-cash-flow .fd-cf-val{font-size:1rem!important}}
+.fd-cpa{display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:linear-gradient(135deg,#eef2ff,#f5f3ff);border:1px solid #c7d2fe;border-left:5px solid var(--fin-purple,#7c3aed);border-radius:var(--fin-radius,12px);padding:14px 18px;margin-bottom:16px;box-shadow:var(--fin-shadow,0 1px 3px rgba(0,0,0,.08))}
+.fd-cpa-icon{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;display:flex;align-items:center;justify-content:center;font-size:1.1rem;flex:0 0 auto}
+.fd-cpa-body{flex:1;min-width:200px}
+.fd-cpa-body strong{display:block;font-size:.95rem;font-weight:800;color:#0f172a}
+.fd-cpa-body span{font-size:.8rem;color:#475569}
+.fd-cpa-btn{display:inline-flex;align-items:center;gap:7px;background:var(--fin-purple,#7c3aed);color:#fff;text-decoration:none;font-weight:700;font-size:.84rem;padding:10px 18px;border-radius:9px;white-space:nowrap;transition:transform .15s,filter .15s}
+.fd-cpa-btn:hover{filter:brightness(1.07);transform:translateY(-1px)}
+.fd-cpa-list{flex:1 1 100%;display:flex;flex-direction:column;gap:6px;margin-top:4px;border-top:1px dashed #c7d2fe;padding-top:10px}
+.fd-cpa-item{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:.82rem;padding:6px 10px;background:#fff;border:1px solid #e2e8f0;border-radius:8px}
+.fd-cpa-amt{font-weight:800;color:#166534;min-width:100px}
+.fd-cpa-meta{flex:1;color:#475569;min-width:160px}
+.fd-cpa-date{color:#94a3b8;font-size:.75rem}
+@media(max-width:600px){.fd-cpa{flex-direction:column;align-items:stretch}.fd-cpa-btn{justify-content:center}}
 </style>
 
 <section class="fin-wrap">
@@ -122,6 +166,28 @@ $maxChartVal = max($maxRevVal, $maxExpVal);
             </select>
         </div>
     </div>
+
+    <?php if ($pendingCustSubmissions > 0): ?>
+    <div class="fd-cpa">
+        <div class="fd-cpa-icon"><i class="fas fa-user-check"></i></div>
+        <div class="fd-cpa-body">
+            <strong><?= (int) $pendingCustSubmissions ?> customer payment<?= $pendingCustSubmissions === 1 ? '' : 's' ?> awaiting verification</strong>
+            <span>Total <?= htmlspecialchars(currency_sym()) ?> <?= number_format($pendingCustSubmissionAmount, 2) ?> submitted by customers and pending Finance approval.</span>
+        </div>
+        <a href="?page=finance_payments&amp;tab=customer" class="fd-cpa-btn"><i class="fas fa-check-circle"></i> Review &amp; Verify</a>
+        <?php if (!empty($customerPendingSubs)): ?>
+        <div class="fd-cpa-list">
+            <?php foreach ($customerPendingSubs as $cs): ?>
+            <div class="fd-cpa-item">
+                <span class="fd-cpa-amt"><?= htmlspecialchars(currency_sym()) ?> <?= number_format((float) $cs['amount'], 2) ?></span>
+                <span class="fd-cpa-meta"><?= htmlspecialchars($cs['customer_name'] ?? 'Unknown customer') ?><?= !empty($cs['invoice_no']) ? ' · ' . htmlspecialchars($cs['invoice_no']) : '' ?> · <?= htmlspecialchars(ucfirst((string) $cs['payment_method'])) ?></span>
+                <span class="fd-cpa-date"><?= date('M d, H:i', strtotime((string) $cs['created_at'])) ?></span>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+    </div>
+    <?php endif; ?>
 
     <div class="fin-stats">
         <div class="fin-stat" onclick="window.location='?page=finance_reports&tab=sales'">
@@ -212,11 +278,12 @@ $maxChartVal = max($maxRevVal, $maxExpVal);
                 <div class="fin-stat-label">Net Profit</div>
             </div>
         </div>
-        <div class="fin-stat" onclick="window.location='?page=finance_payments'">
+        <div class="fin-stat" onclick="window.location='?page=finance_payments<?= $pendingCustSubmissions > 0 ? '&tab=customer' : '' ?>'">
             <div class="fin-stat-icon" style="background:linear-gradient(135deg,#f59e0b,#d97706)"><i class="fas fa-clock"></i></div>
             <div class="fin-stat-body">
-                <div class="fin-stat-val" data-counter="<?= $pendingApprovals ?>" data-prefix="" data-suffix="">0</div>
+                <div class="fin-stat-val" data-counter="<?= $pendingApprovals + $pendingCustSubmissions ?>" data-prefix="" data-suffix="">0</div>
                 <div class="fin-stat-label">Pending Payment Approvals</div>
+                <?php if ($pendingCustSubmissions > 0): ?><div class="fin-stat-change up" style="color:#7c3aed"><i class="fas fa-user-check"></i> <?= (int) $pendingCustSubmissions ?> customer<?= $pendingCustSubmissions === 1 ? '' : 's' ?></div><?php endif; ?>
             </div>
         </div>
         <?php if ($canCredit): ?>

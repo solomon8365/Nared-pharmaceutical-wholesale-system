@@ -56,6 +56,7 @@ class StatusCatalog
     // ─── Invoice fulfillment (invoices.status) ──────────────────────
     public const INVOICE_STATUS_PENDING = 'pending';
     public const INVOICE_STATUS_COMPLETED = 'completed';
+    public const INVOICE_STATUS_CANCELLED = 'cancelled';
 
     // ─── Commission (commissions.status) ────────────────────────────
     public const COMMISSION_PENDING = 'pending';

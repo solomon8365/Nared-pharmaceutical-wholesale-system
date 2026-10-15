@@ -243,6 +243,16 @@
 
       /* Try a smart in-place DOM update */
       domUpdate(form, data);
+
+      /* If the action succeeded but nothing could be reflected in place (for
+         example a new record added to a server-rendered list), reload so the
+         change becomes visible. Mirrors the post/redirect/get flow of a
+         normal (non-intercepted) form submission. */
+      var inPlaceAction = /delete|cancel|remove|reject|deactivate|approve|confirm|complete|activate|mark_paid|set_paid/i
+                            .test((form.querySelector('[name="_action"]') || {}).value || '');
+      if (!hasError && !inPlaceAction) {
+        navigateAfter(finalUrl);
+      }
     })
     .catch(function (err) {
       idle(btn);

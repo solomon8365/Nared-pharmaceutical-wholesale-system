@@ -7,6 +7,7 @@ $tab = $_GET['tab'] ?? 'sales';
 $dateFrom = trim($_GET['date_from'] ?? '');
 $dateTo = trim($_GET['date_to'] ?? '');
 $export = $_GET['export'] ?? '';
+if ($export !== '') { requirePermission('reports', 'export'); }
 
 // ─── Sales Report ──────────────────────────────────────────
 $where = []; $params = [];

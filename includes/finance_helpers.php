@@ -6,10 +6,76 @@
 
 require_once __DIR__ . '/../services/SettingsService.php';
 
+/**
+ * Completes the Bank ledger schema that the finance code already relies on.
+ *
+ * The finance pages/helpers read and write columns and enum values that were
+ * never actually created by migration_finance_erp.sql (bank_transactions.debit,
+ * credit, customer_id, supplier_id; bank_accounts.swift_code, closed_at,
+ * closed_by, closed_reason, frozen_at; refunds.receipt_path) and use payment
+ * transaction types that are missing from the bank_transactions enum. Without
+ * them every bank movement throws "Unknown column", so the whole bank ledger is
+ * dead. All statements are additive and idempotent; existing rows are preserved.
+ */
+function ensureBankLedgerSchema(PDO $pdo): void
+{
+    static $done = false;
+    if ($done) return;
+    $done = true;
+
+    try {
+        $has = function (string $table, string $column) use ($pdo): bool {
+            $s = $pdo->prepare('SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?');
+            $s->execute([$table, $column]);
+            return ((int) $s->fetchColumn()) > 0;
+        };
+
+        // bank_transactions: signed side columns + payment counter-parties.
+        $btCols = [
+            'debit'       => 'DECIMAL(14,2) NOT NULL DEFAULT 0.00',
+            'credit'      => 'DECIMAL(14,2) NOT NULL DEFAULT 0.00',
+            'customer_id' => 'INT(10) UNSIGNED NULL',
+            'supplier_id' => 'INT(10) UNSIGNED NULL',
+        ];
+        foreach ($btCols as $col => $def) {
+            if (!$has('bank_transactions', $col)) {
+                $pdo->exec("ALTER TABLE bank_transactions ADD COLUMN `$col` $def");
+            }
+        }
+
+        // bank_transactions: allow the payment/expense/refund types the code uses.
+        $enum = "ENUM('deposit','withdrawal','transfer_in','transfer_out','interest','fee','adjustment','customer_payment','supplier_payment','expense','refund','income') NOT NULL";
+        $pdo->exec("ALTER TABLE bank_transactions MODIFY COLUMN transaction_type $enum");
+
+        // bank_accounts: SWIFT + lifecycle columns used by the bank page.
+        $baCols = [
+            'swift_code'    => 'VARCHAR(50) NULL',
+            'closed_at'     => 'DATETIME NULL',
+            'closed_by'     => 'INT(10) UNSIGNED NULL',
+            'closed_reason' => 'VARCHAR(255) NULL',
+            'frozen_at'     => 'DATETIME NULL',
+        ];
+        foreach ($baCols as $col => $def) {
+            if (!$has('bank_accounts', $col)) {
+                $pdo->exec("ALTER TABLE bank_accounts ADD COLUMN `$col` $def");
+            }
+        }
+
+        // refunds: receipt upload path used by finance_refunds.php.
+        if (!$has('refunds', 'receipt_path')) {
+            $pdo->exec('ALTER TABLE refunds ADD COLUMN receipt_path VARCHAR(255) NULL');
+        }
+    } catch (Throwable $e) {
+        // Never block a finance page on schema completion.
+    }
+}
+
 function ensureFinanceErpMigration(PDO $pdo): void {
     static $done = false;
     if ($done) return;
     $done = true;
+    // Always complete the live bank/refund schema first (idempotent, additive).
+    ensureBankLedgerSchema($pdo);
     try {
         $stmt = $pdo->prepare('SELECT 1 FROM chart_of_accounts LIMIT 1');
         $stmt->execute();

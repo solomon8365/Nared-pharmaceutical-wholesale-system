@@ -22,6 +22,24 @@ $activeAgreement = null;
 if ($creditSalesEnabled && $cid !== null) {
     $activeAgreement = CreditService::activeAgreement($pdo);
 }
+
+// Registered business/customer record, used to prefill Step 2 without letting
+// the customer silently rewrite verified account information.
+$customer = null;
+if ($cid !== null) {
+    $cstmt = $pdo->prepare('SELECT id, customer_code, name, customer_type, contact_person, phone, email, physical_address, tin_number, license_number, customer_status FROM customers WHERE id = :id LIMIT 1');
+    $cstmt->execute(['id' => $cid]);
+    $customer = $cstmt->fetch() ?: null;
+}
+$customerTypeLabel = '';
+if ($customer) {
+    $typeLabels = [
+        'pharmacy' => 'Pharmacy', 'drug_store' => 'Drug Store', 'hospital' => 'Hospital',
+        'clinic' => 'Clinic', 'wholesaler' => 'Wholesaler', 'other_licensed' => 'Other Licensed',
+    ];
+    $customerTypeLabel = $typeLabels[$customer['customer_type'] ?? ''] ?? '';
+}
+
 $products = $pdo->query("SELECT id, name, brand, generic_name, dosage_form, strength, price, wholesale_price, stock_quantity, barcode FROM products WHERE product_status = 'active' AND (id IN (SELECT product_id FROM product_batches WHERE quantity > 0 AND status = 'active') OR (stock_quantity > 0 AND id NOT IN (SELECT product_id FROM product_batches WHERE quantity > 0))) ORDER BY name")->fetchAll();
 $vatRate = CalculationService::vatRate($pdo);
 
@@ -51,84 +69,107 @@ if ($cid === null) {
     $messages[] = ['type' => 'error', 'text' => 'Your login is not linked to a customer record. Ask an administrator to create a customer login for you.'];
 }
 
+// One-time form token: blocks duplicate submissions (double-click, or a
+// browser back + resubmit after a successful order). The token is rotated on
+// the next GET after a successful submit.
+if (empty($_SESSION['order_form_token'])) {
+    $_SESSION['order_form_token'] = bin2hex(random_bytes(16));
+}
+$formToken = $_SESSION['order_form_token'];
+
+$postedStep = 1;
+$duplicateSubmit = false;
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $cid !== null) {
     require_csrf();
-    $orderDate = $_POST['order_date'] ?? date('Y-m-d');
-    $items = $_POST['request_items'] ?? [];
-    $uid = (int) (currentUser()['id'] ?? 0);
-    $paymentMethod = $_POST['payment_method'] ?? 'cash';
-    $validMethods = ['cash', 'bank', 'cbe_birr', 'telebirr'];
-    if (CreditService::isSalesEnabled()) $validMethods[] = 'credit';
-    if (!in_array($paymentMethod, $validMethods, true)) $paymentMethod = 'cash';
-    $paymentDetail = trim($_POST['payment_detail'] ?? '');
-    $transactionRef = trim($_POST['transaction_ref'] ?? '');
-    $bankName = trim($_POST['bank_name'] ?? '');
-    $accountName = trim($_POST['account_name'] ?? '');
-    $accountNumber = trim($_POST['account_number'] ?? '');
-    $merchantName = trim($_POST['merchant_name'] ?? '');
-    $merchantId = trim($_POST['merchant_id'] ?? '');
-    $deliveryAddress = trim($_POST['delivery_address'] ?? '');
-    $fulfillmentMethod = ($_POST['fulfillment_method'] ?? 'delivery') === 'pickup' ? 'pickup' : 'delivery';
-    $discountPct = (float) ($_POST['discount_percent'] ?? 0);
-    $editingOrderId = isset($_POST['editing_order_id']) ? (int) $_POST['editing_order_id'] : 0;
+    $postedStep = max(1, min(4, (int) ($_POST['current_step'] ?? 4)));
+    $submittedToken = (string) ($_POST['form_token'] ?? '');
+    if ($submittedToken === '' || !hash_equals($formToken, $submittedToken)) {
+        $duplicateSubmit = true;
+        $messages[] = ['type' => 'error', 'text' => 'This order was already submitted. Open My Orders to review it - this avoids creating a duplicate order.'];
+    }
+    if (!$duplicateSubmit) {
+        $orderDate = $_POST['order_date'] ?? date('Y-m-d');
+        $items = $_POST['request_items'] ?? [];
+        $uid = (int) (currentUser()['id'] ?? 0);
+        $paymentMethod = $_POST['payment_method'] ?? 'cash';
+        $validMethods = ['cash', 'bank', 'cbe_birr', 'telebirr'];
+        if (CreditService::isSalesEnabled()) $validMethods[] = 'credit';
+        if (!in_array($paymentMethod, $validMethods, true)) $paymentMethod = 'cash';
+        $paymentDetail = trim($_POST['payment_detail'] ?? '');
+        $transactionRef = trim($_POST['transaction_ref'] ?? '');
+        $bankName = trim($_POST['bank_name'] ?? '');
+        $accountName = trim($_POST['account_name'] ?? '');
+        $accountNumber = trim($_POST['account_number'] ?? '');
+        $merchantName = trim($_POST['merchant_name'] ?? '');
+        $merchantId = trim($_POST['merchant_id'] ?? '');
+        $deliveryAddress = trim($_POST['delivery_address'] ?? '');
+        $orderNotes = trim($_POST['order_notes'] ?? '');
+        $fulfillmentMethod = ($_POST['fulfillment_method'] ?? 'delivery') === 'pickup' ? 'pickup' : 'delivery';
+        $discountPct = (float) ($_POST['discount_percent'] ?? 0);
+        $editingOrderId = isset($_POST['editing_order_id']) ? (int) $_POST['editing_order_id'] : 0;
 
-    $data = [
-        'order_date' => $orderDate,
-        'items' => $items,
-        'payment_method' => $paymentMethod,
-        'payment_detail' => $paymentDetail,
-        'transaction_ref' => $transactionRef,
-        'bank_name' => $bankName,
-        'account_name' => $accountName,
-        'account_number' => $accountNumber,
-        'merchant_name' => $merchantName,
-        'merchant_id' => $merchantId,
-        'delivery_address' => $deliveryAddress,
-        'fulfillment_method' => $fulfillmentMethod,
-        'discount_percent' => $discountPct,
-        'agreement_version_id' => isset($_POST['agreement_version_id']) ? (int) $_POST['agreement_version_id'] : 0,
-        'agreement_accepted' => isset($_POST['agreement_accepted']) ? '1' : '0',
-    ];
+        $data = [
+            'order_date' => $orderDate,
+            'items' => $items,
+            'payment_method' => $paymentMethod,
+            'payment_detail' => $paymentDetail,
+            'transaction_ref' => $transactionRef,
+            'bank_name' => $bankName,
+            'account_name' => $accountName,
+            'account_number' => $accountNumber,
+            'merchant_name' => $merchantName,
+            'merchant_id' => $merchantId,
+            'delivery_address' => $deliveryAddress,
+            'order_notes' => $orderNotes,
+            'fulfillment_method' => $fulfillmentMethod,
+            'discount_percent' => $discountPct,
+            'agreement_version_id' => isset($_POST['agreement_version_id']) ? (int) $_POST['agreement_version_id'] : 0,
+            'agreement_accepted' => isset($_POST['agreement_accepted']) ? '1' : '0',
+        ];
 
-    try {
-        $screenshotPath = null;
-        $uploadedNew = false;
-        if (isset($_FILES['payment_screenshot']) && $_FILES['payment_screenshot']['error'] === UPLOAD_ERR_OK) {
-            $file = $_FILES['payment_screenshot'];
-            $allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-            $extMap = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'image/gif' => 'gif'];
-            $finfo = finfo_open(FILEINFO_MIME_TYPE);
-            $mime = finfo_file($finfo, $file['tmp_name']);
-            finfo_close($finfo);
-            if (!in_array($mime, $allowed, true)) throw new RuntimeException('Payment receipt must be JPEG, PNG, WebP or GIF.');
-            if ($file['size'] > MAX_UPLOAD_SIZE) throw new RuntimeException('Receipt too large (max 2 MB).');
-            if (!is_dir(PAYMENT_UPLOAD_DIR)) mkdir(PAYMENT_UPLOAD_DIR, 0755, true);
-            do { $fname = 'order_' . bin2hex(random_bytes(8)) . '.' . $extMap[$mime]; $dest = PAYMENT_UPLOAD_DIR . DIRECTORY_SEPARATOR . $fname; } while (file_exists($dest));
-            if (!move_uploaded_file($file['tmp_name'], $dest)) throw new RuntimeException('Failed to save receipt.');
-            $screenshotPath = PAYMENT_UPLOAD_URL . '/' . $fname;
-            $uploadedNew = true;
-        }
+        try {
+            $screenshotPath = null;
+            $uploadedNew = false;
+            if (isset($_FILES['payment_screenshot']) && $_FILES['payment_screenshot']['error'] === UPLOAD_ERR_OK) {
+                $file = $_FILES['payment_screenshot'];
+                $allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+                $extMap = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'image/gif' => 'gif'];
+                $finfo = finfo_open(FILEINFO_MIME_TYPE);
+                $mime = finfo_file($finfo, $file['tmp_name']);
+                finfo_close($finfo);
+                if (!in_array($mime, $allowed, true)) throw new RuntimeException('Payment receipt must be JPEG, PNG, WebP or GIF.');
+                if ($file['size'] > MAX_UPLOAD_SIZE) throw new RuntimeException('Receipt too large (max 2 MB).');
+                if (!is_dir(PAYMENT_UPLOAD_DIR)) mkdir(PAYMENT_UPLOAD_DIR, 0755, true);
+                do { $fname = 'order_' . bin2hex(random_bytes(8)) . '.' . $extMap[$mime]; $dest = PAYMENT_UPLOAD_DIR . DIRECTORY_SEPARATOR . $fname; } while (file_exists($dest));
+                if (!move_uploaded_file($file['tmp_name'], $dest)) throw new RuntimeException('Failed to save receipt.');
+                $screenshotPath = PAYMENT_UPLOAD_URL . '/' . $fname;
+                $uploadedNew = true;
+            }
 
-        if ($editingOrderId > 0) {
-            OrderService::updateOrder($pdo, $cid, $editingOrderId, $data, $uploadedNew ? $screenshotPath : null);
-            set_flash('success', 'Order #' . $editingOrderId . ' updated successfully.');
-            header('Location: index.php?page=my_orders');
-            exit;
-        } else {
-            $res = OrderService::submitOrder($pdo, $cid, $uid, $data, $uploadedNew ? $screenshotPath : null);
-            $orderId = $res['order_id'];
-            set_flash('success', 'Order #' . $orderId . ' submitted for finance verification. Track status in My Orders.');
-            header('Location: index.php?page=my_orders');
-            exit;
+            if ($editingOrderId > 0) {
+                OrderService::updateOrder($pdo, $cid, $editingOrderId, $data, $uploadedNew ? $screenshotPath : null);
+                unset($_SESSION['order_form_token']);
+                set_flash('success', 'Order #' . $editingOrderId . ' updated successfully.');
+                header('Location: index.php?page=my_orders');
+                exit;
+            } else {
+                $res = OrderService::submitOrder($pdo, $cid, $uid, $data, $uploadedNew ? $screenshotPath : null);
+                $orderId = $res['order_id'];
+                unset($_SESSION['order_form_token']);
+                set_flash('success', 'Order #' . $orderId . ' submitted successfully and is awaiting finance verification. Track status in My Orders.');
+                header('Location: index.php?page=my_orders');
+                exit;
+            }
+        } catch (ServiceException $e) {
+            $errMsg = $e->getMessage();
+            if (stripos($errMsg, 'Credit limit exceeded') !== false) {
+                $creditLimitError = $errMsg;
+            }
+            $messages[] = ['type' => 'error', 'text' => $errMsg];
+        } catch (Exception $e) {
+            $messages[] = ['type' => 'error', 'text' => $e->getMessage()];
         }
-    } catch (ServiceException $e) {
-        $errMsg = $e->getMessage();
-        if (stripos($errMsg, 'Credit limit exceeded') !== false) {
-            $creditLimitError = $errMsg;
-        }
-        $messages[] = ['type' => 'error', 'text' => $errMsg];
-    } catch (Exception $e) {
-        $messages[] = ['type' => 'error', 'text' => $e->getMessage()];
     }
 }
 
@@ -145,55 +186,195 @@ if ($cid !== null) {
     $pendingCount = (int) $pcStmt->fetchColumn();
 }
 $unreadNotifs = $cid !== null ? getUnreadNotificationCount($pdo, $cid) : 0;
+
+// Which wizard step to re-open after a failed submit.
+$activeStep = 1;
+if ($duplicateSubmit) {
+    $activeStep = 4;
+} elseif (!empty($messages)) {
+    $activeStep = $postedStep;
+    foreach ($messages as $m) {
+        $t = $m['text'];
+        if (stripos($t, 'credit') !== false && stripos($t, 'limit') !== false) { $activeStep = 3; break; }
+        if (stripos($t, 'agreement') !== false || stripos($t, 'transaction') !== false) { $activeStep = 3; break; }
+        if (stripos($t, 'stock') !== false || stripos($t, 'product') !== false || stripos($t, 'quantity') !== false) { $activeStep = 1; break; }
+        if (stripos($t, 'delivery address') !== false || stripos($t, 'fulfillment') !== false) { $activeStep = 2; break; }
+        if (stripos($t, 'payment') !== false) { $activeStep = 3; break; }
+    }
+}
+
+$selMethod = 'cash';
+if ($editOrder && in_array($editOrder['payment_method'], ['cash', 'bank', 'cbe_birr', 'telebirr', 'credit'], true)) {
+    $selMethod = $editOrder['payment_method'];
+} elseif (isset($_POST['payment_method']) && in_array($_POST['payment_method'], ['cash', 'bank', 'cbe_birr', 'telebirr', 'credit'], true)) {
+    $selMethod = $_POST['payment_method'];
+}
+if ($selMethod === 'credit' && !$creditSalesEnabled) $selMethod = 'cash';
+
+$selFulfillment = 'delivery';
+if ($editOrder) {
+    $selFulfillment = ($editOrder['fulfillment_method'] ?? 'delivery') === 'pickup' ? 'pickup' : 'delivery';
+} elseif (isset($_POST['fulfillment_method'])) {
+    $selFulfillment = $_POST['fulfillment_method'] === 'pickup' ? 'pickup' : 'delivery';
+}
+
+// Row renderer shared by the edit list and the blank first row.
+$renderRow = function (int $idx, int $selectedId = 0, int $qty = 1, float $disc = 0) use ($products) {
+    ob_start(); ?>
+    <div class="ord-item" data-index="<?= $idx ?>">
+        <div class="ord-item-head">
+            <select name="request_items[<?= $idx ?>][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)">
+                <option value="">Select product</option>
+                <?php foreach ($products as $product): ?>
+                    <option value="<?= htmlspecialchars((string) $product['id']) ?>"
+                        data-price="<?= (float) $product['price'] ?>"
+                        data-wprice="<?= (float) $product['wholesale_price'] ?>"
+                        data-stock="<?= (int) $product['stock_quantity'] ?>"
+                        data-name="<?= htmlspecialchars($product['name']) ?>"
+                        data-brand="<?= htmlspecialchars($product['brand'] ?? '') ?>"
+                        data-strength="<?= htmlspecialchars($product['strength'] ?? '') ?>"
+                        data-generic="<?= htmlspecialchars($product['generic_name'] ?? '') ?>"
+                        data-form="<?= htmlspecialchars($product['dosage_form'] ?? '') ?>"
+                        data-search="<?= strtolower(htmlspecialchars($product['name'] . ' ' . ($product['brand'] ?? '') . ' ' . ($product['generic_name'] ?? '') . ' ' . ($product['strength'] ?? ''))) ?>"
+                        <?= (int) $product['id'] === $selectedId ? ' selected' : '' ?>><?= htmlspecialchars($product['name']) ?><?= !empty($product['brand']) ? ' (' . htmlspecialchars($product['brand']) . ')' : '' ?><?= !empty($product['strength']) ? ' - ' . htmlspecialchars($product['strength']) : '' ?> — <?= fmt((float) $product['price']) ?></option>
+                <?php endforeach; ?>
+            </select>
+            <button type="button" class="ord-item-remove" onclick="removeItem(this)" title="Remove product"><i class="fas fa-trash-alt"></i></button>
+        </div>
+        <div class="ord-item-grid">
+            <div class="ord-field">
+                <span class="ord-label">Quantity</span>
+                <input type="number" name="request_items[<?= $idx ?>][quantity]" value="<?= $qty ?>" min="1" class="ord-input qty-input" onchange="updatePrice(this.closest('.ord-item'))" onkeyup="updatePrice(this.closest('.ord-item'))" required>
+                <div class="stock-hint"></div>
+            </div>
+            <div class="ord-field">
+                <span class="ord-label">Unit Price</span>
+                <div class="ord-static" data-price-display>—</div>
+            </div>
+            <div class="ord-field">
+                <span class="ord-label">Line Discount (ETB)</span>
+                <input type="number" name="request_items[<?= $idx ?>][line_discount]" value="<?= (float) $disc ?>" min="0" step="0.01" class="ord-input disc-input" onchange="updatePrice(this.closest('.ord-item'))" onkeyup="updatePrice(this.closest('.ord-item'))">
+            </div>
+            <div class="ord-field">
+                <span class="ord-label">Line Total</span>
+                <div class="ord-static ord-line-total" data-line-total>—</div>
+            </div>
+        </div>
+    </div>
+    <?php return ob_get_clean();
+};
 ?>
 <style>
-.ord-wrap{max-width:1400px;margin:0 auto}
-.ord-grid{display:grid;grid-template-columns:1fr 380px;gap:24px;align-items:start}
-@media(max-width:900px){.ord-grid{grid-template-columns:1fr}}
-.ord-panel{background:#fff;border-radius:12px;border:1px solid var(--neutral-200,#e5e7eb);padding:24px;margin-bottom:16px}
-.ord-panel h2{font-size:1rem;font-weight:700;color:var(--brown-800,#3d2c1e);margin-bottom:14px;display:flex;align-items:center;gap:8px}
-.ord-panel h2 i{color:var(--brown-600,#6b4226);font-size:0.95rem}
-.ord-sel{width:100%;padding:10px 12px;border:1px solid var(--neutral-300,#d1d5db);border-radius:8px;font-size:0.88rem;background:#fff}
-.ord-input{width:100%;padding:10px 12px;border:1px solid var(--neutral-300,#d1d5db);border-radius:8px;font-size:0.88rem}
-.ord-input:focus,.ord-sel:focus{outline:none;border-color:var(--brown-500,#8b6914);box-shadow:0 0 0 2px rgba(139,105,20,0.15)}
-.ord-label{display:block;font-size:0.82rem;font-weight:600;color:var(--neutral-600,#4b5563);margin-bottom:5px}
-.ord-field{margin-bottom:12px}
-.ord-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.ord-row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+.ord-wrap{max-width:1280px;margin:0 auto}
+.ord-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:10px}
+.ord-title{font-size:1.35rem;font-weight:800;color:var(--primary-900,#1e3a5f);margin:0;display:flex;align-items:center;gap:10px}
+.ord-title i{color:var(--primary-600,#2563eb)}
+.ord-grid{display:grid;grid-template-columns:1fr 340px;gap:22px;align-items:start}
+@media(max-width:980px){.ord-grid{grid-template-columns:1fr}}
+.ord-main{min-width:0}
 
-@media(max-width:480px){
-    .ord-row,.ord-row3{grid-template-columns:1fr}
-}
-.ord-item{background:var(--neutral-50,#f9fafb);border:1px solid var(--neutral-200,#e5e7eb);border-radius:10px;padding:14px;margin-bottom:10px;position:relative}
-.ord-item select{width:100%}
-.ord-item-bottom{display:grid;grid-template-columns:1fr 120px 120px 100px 36px;gap:8px;margin-top:8px;align-items:end}
-@media(max-width:700px){.ord-item-bottom{grid-template-columns:1fr 1fr;gap:6px}}
-.ord-item-remove{background:var(--red-100,#fee2e2);color:var(--red-700,#b91c1c);border:none;border-radius:6px;cursor:pointer;font-size:0.8rem;padding:6px 10px;display:flex;align-items:center;gap:4px}
-.ord-add-btn{background:var(--brown-50,#f5f0e8);color:var(--brown-700,#5c3d1a);border:1px dashed var(--brown-300,#c4a882);border-radius:8px;padding:10px;width:100%;cursor:pointer;font-weight:600;font-size:0.88rem;display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:14px}
-.ord-add-btn:hover{background:var(--brown-100,#ebe0cc);border-color:var(--brown-500)}
-.ord-submit{background:var(--brown-700,#5c3d1a);color:#fff;border:none;border-radius:10px;padding:14px 28px;font-size:1rem;font-weight:700;cursor:pointer;width:100%;display:flex;align-items:center;justify-content:center;gap:8px;transition:background 0.2s}
-.ord-submit:hover{background:var(--brown-800,#3d2c1e)}
-.ord-cancel{display:inline-flex;align-items:center;justify-content:center;padding:12px 20px;color:var(--neutral-600,#4b5563);font-weight:600;font-size:0.88rem;border-radius:8px;text-decoration:none;margin-top:8px;width:100%;text-align:center;border:1px solid var(--neutral-300)}
-.ord-cancel:hover{background:var(--neutral-100)}
-.payment-fields{display:none;margin-top:10px;padding:12px;background:var(--neutral-50,#f9fafb);border:1px solid var(--neutral-200);border-radius:8px}
-.payment-fields.active{display:block}
-.summary-row{display:flex;justify-content:space-between;padding:6px 0;font-size:0.88rem;color:var(--neutral-600,#4b5563)}
-.summary-row.total{border-top:2px solid var(--brown-300,#c4a882);padding-top:10px;margin-top:6px;font-weight:700;font-size:1.05rem;color:var(--brown-800,#3d2c1e)}
-.credit-bar{background:var(--neutral-100);border-radius:6px;height:8px;overflow:hidden;margin-top:6px}
-.credit-bar-fill{height:100%;background:var(--green-600,#059669);border-radius:6px;transition:width 0.3s}
-.notif-badge{background:var(--red-600);color:#fff;border-radius:50%;font-size:0.68rem;padding:2px 6px;font-weight:700;margin-left:4px}
-.empty-cart{text-align:center;padding:30px;color:var(--neutral-500);font-size:0.9rem}
-.stock-low{color:var(--orange-600,#ea580c);font-size:0.75rem;font-weight:600}
-.stock-ok{color:var(--green-700,#15803d);font-size:0.75rem}
-.line-total{font-weight:700;color:var(--brown-700);font-size:0.92rem}
+/* Step indicator */
+.ord-steps{display:flex;list-style:none;margin:0 0 18px;padding:0;gap:6px;overflow-x:auto;scrollbar-width:thin}
+.ord-step-item{display:flex;align-items:center;gap:9px;padding:8px 12px;border-radius:10px;flex:1;min-width:150px;background:#fff;border:1px solid var(--neutral-200,#e2e8f0)}
+.ord-step-item .num{width:26px;height:26px;border-radius:50%;background:var(--neutral-100,#f1f5f9);color:var(--neutral-500,#64748b);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:.78rem;flex-shrink:0}
+.ord-step-item .lbl{font-size:.82rem;font-weight:700;color:var(--neutral-500,#64748b);white-space:nowrap}
+.ord-step-item .lbl small{display:block;font-weight:500;font-size:.68rem;color:var(--neutral-400,#94a3b8)}
+.ord-step-item.is-active{border-color:var(--primary-600,#2563eb);background:var(--primary-50,#eff6ff)}
+.ord-step-item.is-active .num{background:var(--primary-600,#2563eb);color:#fff}
+.ord-step-item.is-active .lbl{color:var(--primary-800,#1e40af)}
+.ord-step-item.is-done .num{background:var(--green-600,#16a34a);color:#fff}
+.ord-step-item.is-done .lbl{color:var(--primary-900,#1e3a5f)}
+
+.ord-panel{background:#fff;border-radius:14px;border:1px solid var(--neutral-200,#e2e8f0);padding:22px;margin-bottom:14px;box-shadow:0 1px 3px rgba(15,23,42,.04)}
+.ord-panel h2{font-size:1rem;font-weight:800;color:var(--primary-900,#1e3a5f);margin:0 0 16px;display:flex;align-items:center;gap:9px}
+.ord-panel h2 i{color:var(--primary-600,#2563eb);font-size:.95rem}
+.ord-pane{display:none}
+.ord-pane.is-active{display:block;animation:ordFade .18s ease}
+@keyframes ordFade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+.ord-label{display:block;font-size:.8rem;font-weight:700;color:var(--neutral-600,#475569);margin-bottom:5px}
+.ord-field{margin-bottom:14px}
+.ord-input,.ord-sel{width:100%;padding:10px 12px;border:1px solid var(--neutral-300,#cbd5e1);border-radius:9px;font-size:.88rem;font-family:inherit;background:#fff;color:#0f172a;box-sizing:border-box}
+.ord-input:focus,.ord-sel:focus{outline:none;border-color:var(--primary-600,#2563eb);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+.ord-input.ord-invalid,.ord-sel.ord-invalid{border-color:#dc2626;box-shadow:0 0 0 3px rgba(220,38,38,.12)}
+.ord-static{padding:10px 12px;border:1px dashed var(--neutral-300,#cbd5e1);border-radius:9px;background:var(--neutral-50,#f8fafc);font-size:.88rem;color:#0f172a;min-height:42px;display:flex;align-items:center}
+.ord-line-total{font-weight:800;color:var(--primary-800,#1e40af)}
+.ord-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.ord-row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+@media(max-width:560px){.ord-row,.ord-row3{grid-template-columns:1fr}}
+
+.ord-item{border:1px solid var(--neutral-200,#e2e8f0);border-radius:11px;padding:14px;margin-bottom:12px;background:#fff}
+.ord-item-head{display:flex;gap:8px;align-items:center;margin-bottom:10px}
+.ord-item-head .product-select{flex:1;min-width:0}
+.ord-item-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px}
+@media(max-width:720px){.ord-item-grid{grid-template-columns:1fr 1fr}}
+.ord-item-remove{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;border-radius:9px;cursor:pointer;padding:10px 12px;flex-shrink:0;font-size:.85rem}
+.ord-item-remove:hover{background:#fee2e2}
+.ord-add-btn{background:var(--primary-50,#eff6ff);color:var(--primary-800,#1e40af);border:1.5px dashed var(--primary-200,#bfdbfe);border-radius:10px;padding:11px;width:100%;cursor:pointer;font-weight:700;font-size:.86rem;display:flex;align-items:center;justify-content:center;gap:7px}
+.ord-add-btn:hover{background:var(--primary-100,#dbeafe)}
+.stock-hint{margin-top:5px;font-size:.74rem;font-weight:700}
+.ord-in{color:#15803d}.ord-out{color:#dc2626}
+
+/* Business info card */
+.ord-info-card{background:var(--primary-50,#eff6ff);border:1px solid var(--primary-200,#bfdbfe);border-radius:12px;padding:16px;margin-bottom:16px}
+.ord-info-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px 18px;margin-top:8px}
+@media(max-width:560px){.ord-info-grid{grid-template-columns:1fr}}
+.ord-info-grid dt{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:var(--primary-700,#1d4ed8)}
+.ord-info-grid dd{margin:2px 0 0;font-size:.86rem;font-weight:600;color:#0f172a}
+
+/* Payment cards */
+.ord-pay-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px}
+.ord-pay-card{position:relative;display:flex;flex-direction:column;gap:4px;padding:14px;border:1.5px solid var(--neutral-200,#e2e8f0);border-radius:12px;cursor:pointer;background:#fff;transition:all .15s}
+.ord-pay-card:hover{border-color:var(--primary-300,#93c5fd)}
+.ord-pay-card.is-selected{border-color:var(--primary-600,#2563eb);background:var(--primary-50,#eff6ff);box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+.ord-pay-card input{position:absolute;opacity:0;pointer-events:none}
+.ord-pay-card .pc-icon{font-size:1.1rem;color:var(--primary-600,#2563eb)}
+.ord-pay-card .pc-name{font-size:.86rem;font-weight:800;color:var(--primary-900,#1e3a5f)}
+.ord-pay-card .pc-sub{font-size:.72rem;color:var(--neutral-500,#64748b)}
+.ord-pay-card.is-disabled{opacity:.55;cursor:not-allowed}
+.ord-paypanel{display:none;margin-top:6px;padding:14px;background:var(--neutral-50,#f8fafc);border:1px solid var(--neutral-200,#e2e8f0);border-radius:11px}
+.ord-paypanel.is-active{display:block}
+.ord-note-box{font-size:.82rem;color:var(--neutral-600,#475569);line-height:1.5}
+
+/* Summary */
+.ord-side{position:sticky;top:16px}
+.summary-row{display:flex;justify-content:space-between;padding:6px 0;font-size:.87rem;color:var(--neutral-600,#475569)}
+.summary-row span:last-child{font-weight:600;color:#0f172a}
+.summary-row.total{border-top:2px solid var(--primary-200,#bfdbfe);padding-top:11px;margin-top:7px;font-weight:800;font-size:1.05rem}
+.summary-row.total span{color:var(--primary-900,#1e3a5f)}
+.ord-empty{text-align:center;padding:26px 12px;color:var(--neutral-400,#94a3b8);font-size:.86rem}
+.ord-empty i{font-size:1.9rem;display:block;margin-bottom:8px;color:var(--neutral-300,#cbd5e1)}
+
+/* Nav buttons */
+.ord-nav{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:6px}
+.ord-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:none;border-radius:10px;padding:12px 22px;font-size:.9rem;font-weight:700;cursor:pointer;font-family:inherit;text-decoration:none;transition:all .15s}
+.ord-btn-primary{background:var(--primary-600,#2563eb);color:#fff}
+.ord-btn-primary:hover{background:var(--primary-700,#1d4ed8)}
+.ord-btn-ghost{background:#fff;color:var(--neutral-600,#475569);border:1px solid var(--neutral-300,#cbd5e1)}
+.ord-btn-ghost:hover{background:var(--neutral-50,#f8fafc)}
+.ord-btn-submit{background:var(--primary-800,#1e40af);color:#fff}
+.ord-btn-submit:hover{background:var(--primary-900,#1e3a5f)}
+.ord-btn[disabled]{opacity:.6;cursor:wait}
+.ord-cancel{text-align:center;display:block;margin-top:10px;font-size:.84rem;color:var(--neutral-500,#64748b);text-decoration:none}
+.ord-cancel:hover{color:var(--primary-600,#2563eb)}
+.credit-bar{background:var(--neutral-100,#f1f5f9);border-radius:6px;height:8px;overflow:hidden;margin-top:6px}
+.credit-bar-fill{height:100%;background:var(--primary-600,#2563eb);border-radius:6px}
+.notif-badge{background:#dc2626;color:#fff;border-radius:20px;font-size:.68rem;padding:3px 9px;font-weight:700}
+.ord-review-tbl{width:100%;border-collapse:collapse;font-size:.8rem;margin-bottom:12px}
+.ord-review-tbl th{text-align:left;padding:7px 9px;background:var(--neutral-50,#f8fafc);font-size:.7rem;text-transform:uppercase;letter-spacing:.03em;color:var(--neutral-500,#64748b);border-bottom:1px solid var(--neutral-200,#e2e8f0)}
+.ord-review-tbl td{padding:7px 9px;border-bottom:1px solid var(--neutral-100,#f1f5f9)}
+.confirm-check{display:flex;gap:10px;align-items:flex-start;padding:14px;background:var(--primary-50,#eff6ff);border:1px solid var(--primary-200,#bfdbfe);border-radius:11px;font-size:.85rem;color:#0f172a;cursor:pointer}
+.confirm-check input{margin-top:2px;width:auto}
+.badge-soft{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:.72rem;font-weight:700;background:var(--primary-100,#dbeafe);color:var(--primary-800,#1e40af)}
 </style>
 
-<section class="ord-wrap">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:10px">
-        <h1 style="font-size:1.3rem;font-weight:700;color:var(--brown-800);margin:0"><?= $editOrder ? 'Edit Order #' . (int) $editOrder['id'] : 'Place Order' ?></h1>
-        <div style="display:flex;gap:10px;align-items:center">
+<section class="ord-wrap" id="ordMain">
+    <div class="ord-head">
+        <h1 class="ord-title"><i class="fas fa-file-medical"></i> <?= $editOrder ? 'Edit Order #' . (int) $editOrder['id'] : 'Place Order' ?></h1>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
             <?php if ($unreadNotifs > 0): ?><span class="notif-badge"><?= $unreadNotifs ?> new</span><?php endif; ?>
-            <?php if ($pendingCount > 0): ?><span style="background:var(--orange-100);color:var(--orange-700);padding:4px 10px;border-radius:20px;font-size:0.78rem;font-weight:600"><i class="fas fa-clock"></i> <?= $pendingCount ?> pending order<?= $pendingCount > 1 ? 's' : '' ?></span><?php endif; ?>
+            <?php if ($pendingCount > 0): ?><span class="badge-soft"><i class="fas fa-clock"></i> <?= $pendingCount ?> pending order<?= $pendingCount > 1 ? 's' : '' ?></span><?php endif; ?>
+            <a href="index.php?page=my_orders" class="ord-btn ord-btn-ghost" style="padding:8px 14px;font-size:.82rem"><i class="fas fa-list"></i> My Orders</a>
         </div>
     </div>
 
@@ -205,9 +386,9 @@ $unreadNotifs = $cid !== null ? getUnreadNotificationCount($pdo, $cid) : 0;
     <div class="cl-modal" id="creditLimitModal">
         <div class="cl-modal-card">
             <div class="cl-modal-icon"><i class="fas fa-exclamation-triangle"></i></div>
-            <h2 class="cl-modal-title">Credit limit exceeded!</h2>
+            <h2 class="cl-modal-title">Credit limit exceeded</h2>
             <p class="cl-modal-detail"><?= htmlspecialchars($creditLimitError) ?></p>
-            <p class="cl-modal-hint">Your order was <strong>not</strong> submitted. Please reduce the order total, pay down your outstanding balance, or contact our finance team for a credit limit review.</p>
+            <p class="cl-modal-hint">Your order was <strong>not</strong> submitted. Reduce the order total, pay down your outstanding balance, or contact finance for a credit limit review.</p>
             <div class="cl-modal-actions">
                 <button type="button" class="cl-btn cl-btn-primary" onclick="closeCreditLimitModal()">Adjust My Order</button>
                 <a href="?page=credit_portal" class="cl-btn cl-btn-link"><i class="fas fa-credit-card"></i> My Credit</a>
@@ -232,12 +413,11 @@ $unreadNotifs = $cid !== null ? getUnreadNotificationCount($pdo, $cid) : 0;
     function closeCreditLimitModal() {
         var m = document.getElementById('creditLimitModal');
         if (m) m.style.display = 'none';
-        var first = document.querySelector('#orderForm input:invalid, #orderForm select:invalid, #orderForm textarea:invalid');
-        if (first) { first.scrollIntoView({ behavior: 'smooth', block: 'center' }); first.focus(); }
+        ordShowStep(3);
     }
     document.addEventListener('DOMContentLoaded', function() {
         var m = document.getElementById('creditLimitModal');
-        if (m) m.addEventListener('click', function(e) { if (e.target === m) document.getElementById('creditLimitModal').style.display = 'none'; });
+        if (m) m.addEventListener('click', function(e) { if (e.target === m) m.style.display = 'none'; });
     });
     </script>
     <?php endif; ?>
@@ -245,317 +425,319 @@ $unreadNotifs = $cid !== null ? getUnreadNotificationCount($pdo, $cid) : 0;
     <?php if ($cid === null): ?>
         <div class="ord-panel"><p>Your account is not linked to a customer profile. Contact an administrator.</p></div>
     <?php elseif (empty($products)): ?>
-        <div class="ord-panel"><p>No products are available yet.</p></div>
+        <div class="ord-panel"><p>No products are available yet. Please check back later.</p></div>
     <?php else: ?>
     <form method="post" enctype="multipart/form-data" id="orderForm" data-swal-exclude="true" data-ajax-off="true" novalidate>
         <?= csrf_field() ?>
+        <input type="hidden" name="form_token" value="<?= htmlspecialchars($formToken) ?>">
+        <input type="hidden" name="current_step" id="current_step" value="<?= (int) $activeStep ?>">
         <?php if ($editOrder): ?>
             <input type="hidden" name="editing_order_id" value="<?= (int) $editOrder['id'] ?>">
         <?php endif; ?>
 
         <div class="ord-grid">
-            <div>
-                <div class="ord-panel">
-                    <h2><i class="fas fa-box"></i> Order Items</h2>
-                    <div style="margin-bottom:12px;position:relative">
-                        <input type="text" id="productSearch" class="ord-input" placeholder="Search products by name, brand, or generic..." oninput="filterProductSelects(this.value)" style="padding-left:34px">
-                        <i class="fas fa-search" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--neutral-400);font-size:0.85rem;pointer-events:none"></i>
+            <div class="ord-main">
+                <ol class="ord-steps" id="ordSteps">
+                    <li class="ord-step-item" data-step="1"><span class="num">1</span><span class="lbl">Review Order<small>Products &amp; quantities</small></span></li>
+                    <li class="ord-step-item" data-step="2"><span class="num">2</span><span class="lbl">Customer &amp; Delivery<small>Who &amp; where</small></span></li>
+                    <li class="ord-step-item" data-step="3"><span class="num">3</span><span class="lbl">Payment Method<small>How you pay</small></span></li>
+                    <li class="ord-step-item" data-step="4"><span class="num">4</span><span class="lbl">Confirmation<small>Review &amp; submit</small></span></li>
+                </ol>
+
+                <!-- STEP 1 -->
+                <div class="ord-panel ord-pane" data-step="1">
+                    <h2><i class="fas fa-box-open"></i> Step 1 · Review Order</h2>
+                    <div class="ord-field" style="position:relative">
+                        <input type="text" id="productSearch" class="ord-input" placeholder="Search products by name, brand, generic or strength..." oninput="filterProductSelects(this.value)" style="padding-left:34px">
+                        <i class="fas fa-search" style="position:absolute;left:12px;top:38px;color:var(--neutral-400,#94a3b8);font-size:.85rem;pointer-events:none"></i>
                     </div>
                     <div id="orderItems">
                         <?php if ($editOrder && !empty($editOrderItems)): ?>
                             <?php foreach ($editOrderItems as $i => $item): ?>
-                                <div class="ord-item" data-index="<?= $i ?>">
-                                    <div style="margin-bottom:6px">
-                                        <select name="request_items[<?= $i ?>][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)">
-                                            <option value="">Select product</option>
-                                            <?php foreach ($products as $product): ?>
-                                                <option value="<?= htmlspecialchars((string) $product['id']) ?>" data-price="<?= (float) $product['price'] ?>" data-wprice="<?= (float) $product['wholesale_price'] ?>" data-stock="<?= (int) $product['stock_quantity'] ?>" data-name="<?= htmlspecialchars($product['name']) ?>" data-brand="<?= htmlspecialchars($product['brand'] ?? '') ?>" data-strength="<?= htmlspecialchars($product['strength'] ?? '') ?>" data-generic="<?= htmlspecialchars($product['generic_name'] ?? '') ?>" data-form="<?= htmlspecialchars($product['dosage_form'] ?? '') ?>" data-search="<?= strtolower(htmlspecialchars($product['name'] . ' ' . ($product['brand'] ?? '') . ' ' . ($product['generic_name'] ?? '') . ' ' . ($product['strength'] ?? ''))) ?>"<?= (int) $product['id'] === (int) $item['product_id'] ? ' selected' : '' ?>><?= htmlspecialchars($product['name']) ?><?= !empty($product['brand']) ? ' (' . htmlspecialchars($product['brand']) . ')' : '' ?><?= !empty($product['strength']) ? ' - ' . htmlspecialchars($product['strength']) : '' ?> — <?= fmt((float) $product['price']) ?></option>
-                                            <?php endforeach; ?>
-                                        </select>
-                                    </div>
-                                    <div class="ord-item-bottom">
-                                        <div>
-                                            <span class="ord-label">Quantity</span>
-                                            <input type="number" name="request_items[<?= $i ?>][quantity]" value="<?= (int) $item['quantity'] ?>" min="1" class="ord-input qty-input" onchange="updatePrice(this.closest('.ord-item'))" onkeyup="updatePrice(this.closest('.ord-item'))" required>
-                                            <div class="stock-hint stock-ok" style="margin-top:4px"></div>
-                                        </div>
-                                        <div>
-                                            <span class="ord-label">Unit Price</span>
-                                            <div class="ord-input" style="background:var(--neutral-100);border-style:dashed;display:flex;align-items:center;height:42px" data-price-display>0</div>
-                                        </div>
-                                        <div>
-                                            <span class="ord-label">Discount (ETB)</span>
-                                            <input type="number" name="request_items[<?= $i ?>][line_discount]" value="<?= (float) ($item['discount'] ?? 0) ?>" min="0" step="0.01" class="ord-input disc-input" onchange="updatePrice(this.closest('.ord-item'))" onkeyup="updatePrice(this.closest('.ord-item'))">
-                                        </div>
-                                        <div>
-                                            <span class="ord-label">Line Total</span>
-                                            <div class="line-total" data-line-total>0</div>
-                                        </div>
-                                        <button type="button" class="ord-item-remove" onclick="removeItem(this)"><i class="fas fa-times"></i></button>
-                                    </div>
-                                </div>
+                                <?= $renderRow((int) $i, (int) $item['product_id'], (int) $item['quantity'], (float) ($item['discount'] ?? 0)) ?>
                             <?php endforeach; ?>
                         <?php else: ?>
-                            <div class="ord-item" data-index="0">
-                                <div style="margin-bottom:6px">
-                                    <select name="request_items[0][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)">
-                                        <option value="">Select product</option>
-                                        <?php foreach ($products as $product): ?>
-                                            <option value="<?= htmlspecialchars((string) $product['id']) ?>" data-price="<?= (float) $product['price'] ?>" data-wprice="<?= (float) $product['wholesale_price'] ?>" data-stock="<?= (int) $product['stock_quantity'] ?>" data-name="<?= htmlspecialchars($product['name']) ?>" data-brand="<?= htmlspecialchars($product['brand'] ?? '') ?>" data-strength="<?= htmlspecialchars($product['strength'] ?? '') ?>" data-generic="<?= htmlspecialchars($product['generic_name'] ?? '') ?>" data-form="<?= htmlspecialchars($product['dosage_form'] ?? '') ?>" data-search="<?= strtolower(htmlspecialchars($product['name'] . ' ' . ($product['brand'] ?? '') . ' ' . ($product['generic_name'] ?? '') . ' ' . ($product['strength'] ?? ''))) ?>"<?= (int) $product['id'] === $prefillPid ? ' selected' : '' ?>><?= htmlspecialchars($product['name']) ?><?= !empty($product['brand']) ? ' (' . htmlspecialchars($product['brand']) . ')' : '' ?><?= !empty($product['strength']) ? ' - ' . htmlspecialchars($product['strength']) : '' ?> — <?= fmt((float) $product['price']) ?></option>
-                                        <?php endforeach; ?>
-                                    </select>
-                                </div>
-                                <div class="ord-item-bottom">
-                                    <div>
-                                        <span class="ord-label">Quantity</span>
-                                        <input type="number" name="request_items[0][quantity]" value="1" min="1" class="ord-input qty-input" onchange="updatePrice(this.closest('.ord-item'))" onkeyup="updatePrice(this.closest('.ord-item'))" required>
-                                        <div class="stock-hint stock-ok" style="margin-top:4px"></div>
-                                    </div>
-                                    <div>
-                                        <span class="ord-label">Unit Price</span>
-                                        <div class="ord-input" style="background:var(--neutral-100);border-style:dashed;display:flex;align-items:center;height:42px" data-price-display>0</div>
-                                    </div>
-                                    <div>
-                                        <span class="ord-label">Discount (ETB)</span>
-                                        <input type="number" name="request_items[0][line_discount]" value="0" min="0" step="0.01" class="ord-input disc-input" onchange="updatePrice(this.closest('.ord-item'))" onkeyup="updatePrice(this.closest('.ord-item'))">
-                                    </div>
-                                    <div>
-                                        <span class="ord-label">Line Total</span>
-                                        <div class="line-total" data-line-total>0</div>
-                                    </div>
-                                    <button type="button" class="ord-item-remove" onclick="removeItem(this)"><i class="fas fa-times"></i></button>
-                                </div>
-                            </div>
+                            <?= $renderRow(0, $prefillPid, 1, 0) ?>
                         <?php endif; ?>
                     </div>
                     <button type="button" class="ord-add-btn" onclick="addItem()"><i class="fas fa-plus"></i> Add Another Product</button>
-                </div>
-
-                <div class="ord-panel">
-                    <h2><i class="fas fa-truck-loading"></i> Fulfillment Method</h2>
-                    <div class="ord-field">
-                        <span class="ord-label">How would you like to receive this order? *</span>
-                        <select name="fulfillment_method" class="ord-sel" id="fulfillmentMethod" onchange="switchFulfillmentMethod()" required>
-                            <option value="delivery" <?= (($editOrder ? ($editOrder['fulfillment_method'] ?? '') : ($_POST['fulfillment_method'] ?? 'delivery')) === 'delivery') ? 'selected' : '' ?>>Delivery to Address</option>
-                            <option value="pickup" <?= (($editOrder ? ($editOrder['fulfillment_method'] ?? '') : ($_POST['fulfillment_method'] ?? '')) === 'pickup') ? 'selected' : '' ?>>Pickup from Store</option>
-                        </select>
-                    </div>
-                    <div id="deliveryAddressBlock">
-                        <div class="ord-field">
-                            <span class="ord-label">Delivery Address *</span>
-                            <textarea name="delivery_address" rows="3" class="ord-input" id="deliveryAddressInput" required placeholder="Full delivery address including city, area, landmark"><?= htmlspecialchars($editOrder ? ($editOrder['delivery_address'] ?? '') : ($_POST['delivery_address'] ?? '')) ?></textarea>
-                        </div>
-                    </div>
-                    <div id="pickupInfoBlock" style="display:none;padding:12px;background:var(--brown-50,#f5f0e8);border:1px dashed var(--brown-300,#c4a882);border-radius:8px;font-size:0.85rem;color:var(--brown-800,#3d2c1e)">
-                        <i class="fas fa-store"></i> You will be notified when your order is packed and ready for pickup at our store.
-                    </div>
-                    <div class="ord-row">
+                    <div class="ord-row" style="margin-top:16px">
                         <div class="ord-field">
                             <span class="ord-label">Order Date</span>
                             <input type="date" name="order_date" value="<?= htmlspecialchars($editOrder ? $editOrder['order_date'] : ($_POST['order_date'] ?? date('Y-m-d'))) ?>" class="ord-input">
                         </div>
                         <div class="ord-field">
                             <span class="ord-label">Order Discount (%)</span>
-                            <input type="number" name="discount_percent" value="0" min="0" max="100" step="0.1" class="ord-input" id="discountPercent" onchange="recalcSummary()" onkeyup="recalcSummary()">
+                            <input type="number" name="discount_percent" id="discountPercent" value="<?= htmlspecialchars((string) ($editOrder ? ($editOrder['discount_amount'] > 0 && $editOrder['total_amount'] > 0 ? '' : 0) : 0)) ?>" min="0" max="100" step="0.1" class="ord-input" onchange="recalcSummary()" onkeyup="recalcSummary()">
                         </div>
                     </div>
                 </div>
 
-                <div class="ord-panel">
-                    <h2><i class="fas fa-credit-card"></i> Payment Method</h2>
+                <!-- STEP 2 -->
+                <div class="ord-panel ord-pane" data-step="2">
+                    <h2><i class="fas fa-building"></i> Step 2 · Customer &amp; Delivery Details</h2>
+                    <?php if ($customer): ?>
+                    <div class="ord-info-card">
+                        <div style="font-size:.8rem;font-weight:800;color:var(--primary-800,#1e40af)"><i class="fas fa-check-circle"></i> Ordering as your registered account</div>
+                        <dl class="ord-info-grid">
+                            <div><dt>Business Name</dt><dd><?= htmlspecialchars($customer['name']) ?></dd></div>
+                            <div><dt>Account Type</dt><dd><?= htmlspecialchars($customerTypeLabel ?: 'Registered Customer') ?></dd></div>
+                            <div><dt>Contact Person</dt><dd><?= htmlspecialchars($customer['contact_person'] ?: '—') ?></dd></div>
+                            <div><dt>Phone</dt><dd><?= htmlspecialchars($customer['phone'] ?: '—') ?></dd></div>
+                            <div><dt>TIN</dt><dd><?= htmlspecialchars($customer['tin_number'] ?: '—') ?></dd></div>
+                            <div><dt>License No.</dt><dd><?= htmlspecialchars($customer['license_number'] ?: '—') ?></dd></div>
+                            <div style="grid-column:1/-1"><dt>Registered Address</dt><dd><?= htmlspecialchars($customer['physical_address'] ?: '—') ?></dd></div>
+                        </dl>
+                        <p style="font-size:.74rem;color:var(--primary-700,#1d4ed8);margin:10px 0 0"><i class="fas fa-lock"></i> Verified account details above cannot be changed here. Contact support to update them.</p>
+                    </div>
+                    <?php endif; ?>
                     <div class="ord-field">
-                        <span class="ord-label">Select Payment Method *</span>
-                        <select name="payment_method" class="ord-sel" id="paymentMethod" onchange="switchPaymentMethod()" required>
-                            <option value="cash" <?= (($editOrder ? $editOrder['payment_method'] : ($_POST['payment_method'] ?? 'cash')) === 'cash') ? 'selected' : '' ?>>Cash</option>
-                            <option value="bank" <?= (($editOrder ? $editOrder['payment_method'] : ($_POST['payment_method'] ?? '')) === 'bank') ? 'selected' : '' ?>>Bank Transfer</option>
-                            <option value="cbe_birr" <?= (($editOrder ? $editOrder['payment_method'] : ($_POST['payment_method'] ?? '')) === 'cbe_birr') ? 'selected' : '' ?>>CBE Birr</option>
-                            <option value="telebirr" <?= (($editOrder ? $editOrder['payment_method'] : ($_POST['payment_method'] ?? '')) === 'telebirr') ? 'selected' : '' ?>>Telebirr</option>
-                            <?php if ($creditSalesEnabled): ?>
-                            <option value="credit" <?= (($editOrder ? $editOrder['payment_method'] : ($_POST['payment_method'] ?? '')) === 'credit') ? 'selected' : '' ?>>Credit Account</option>
-                            <?php endif; ?>
+                        <span class="ord-label">How would you like to receive this order? *</span>
+                        <select name="fulfillment_method" class="ord-sel" id="fulfillmentMethod" onchange="switchFulfillmentMethod()" required>
+                            <option value="delivery" <?= $selFulfillment === 'delivery' ? 'selected' : '' ?>>Delivery to Address</option>
+                            <option value="pickup" <?= $selFulfillment === 'pickup' ? 'selected' : '' ?>>Pickup from Store (wholesale pickup pricing)</option>
                         </select>
                     </div>
-
-                    <div id="pf-bank" class="payment-fields">
-                        <div class="ord-row">
-                            <div class="ord-field">
-                                <span class="ord-label">Bank Name</span>
-                                <input type="text" name="bank_name" class="ord-input" placeholder="e.g. Commercial Bank of Ethiopia" value="<?= htmlspecialchars($editOrder ? ($editOrder['bank_name'] ?? '') : ($_POST['bank_name'] ?? '')) ?>">
-                            </div>
-                            <div class="ord-field">
-                                <span class="ord-label">Account Name</span>
-                                <input type="text" name="account_name" class="ord-input" placeholder="Account holder name" value="<?= htmlspecialchars($editOrder ? ($editOrder['account_name'] ?? '') : ($_POST['account_name'] ?? '')) ?>">
-                            </div>
-                        </div>
-                        <div class="ord-row">
-                            <div class="ord-field">
-                                <span class="ord-label">Account Number</span>
-                                <input type="text" name="account_number" class="ord-input" placeholder="Account number" value="<?= htmlspecialchars($editOrder ? ($editOrder['account_number'] ?? '') : ($_POST['account_number'] ?? '')) ?>">
-                            </div>
-                            <div class="ord-field">
-                                <span class="ord-label">Transaction Reference</span>
-                                <input type="text" name="transaction_ref" class="ord-input" placeholder="Transfer ref or receipt number" value="<?= htmlspecialchars($editOrder ? ($editOrder['transaction_ref'] ?? '') : ($_POST['transaction_ref'] ?? '')) ?>">
-                            </div>
-                        </div>
-                    </div>
-
-                    <div id="pf-cbe_birr" class="payment-fields">
-                        <div class="ord-row">
-                            <div class="ord-field">
-                                <span class="ord-label">Merchant Name</span>
-                                <input type="text" name="merchant_name" class="ord-input" placeholder="Merchant name" value="<?= htmlspecialchars($editOrder ? ($editOrder['merchant_name'] ?? '') : ($_POST['merchant_name'] ?? '')) ?>">
-                            </div>
-                            <div class="ord-field">
-                                <span class="ord-label">Merchant ID</span>
-                                <input type="text" name="merchant_id" class="ord-input" placeholder="Merchant ID" value="<?= htmlspecialchars($editOrder ? ($editOrder['merchant_id'] ?? '') : ($_POST['merchant_id'] ?? '')) ?>">
-                            </div>
-                        </div>
+                    <div id="deliveryAddressBlock">
                         <div class="ord-field">
-                            <span class="ord-label">Transaction Reference *</span>
-                            <input type="text" name="transaction_ref" class="ord-input" placeholder="CBE Birr transaction reference" value="<?= htmlspecialchars($editOrder ? ($editOrder['transaction_ref'] ?? '') : ($_POST['transaction_ref'] ?? '')) ?>">
+                            <span class="ord-label">Delivery Address *</span>
+                            <textarea name="delivery_address" rows="3" class="ord-input" id="deliveryAddressInput" required placeholder="Full delivery address including city, sub-city, area and landmark"><?= htmlspecialchars($editOrder ? ($editOrder['delivery_address'] ?? '') : ($_POST['delivery_address'] ?? ($customer['physical_address'] ?? ''))) ?></textarea>
                         </div>
-                        <div style="text-align:center;margin-top:10px;padding:16px;background:var(--neutral-100);border-radius:8px">
-                            <p style="font-size:0.82rem;color:var(--neutral-600);margin-bottom:8px">Scan to pay via CBE Birr</p>
-                            <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=<?= urlencode('cbebirr://pay?merchant=' . ($editOrder ? ($editOrder['merchant_id'] ?? 'NARED') : 'NARED') . '&amount=ORDER_TOTAL') ?>" alt="CBE Birr QR" style="border-radius:8px;border:1px solid var(--neutral-300)">
+                    </div>
+                    <div id="pickupInfoBlock" style="display:none;padding:12px 14px;background:var(--primary-50,#eff6ff);border:1px dashed var(--primary-200,#bfdbfe);border-radius:10px;font-size:.84rem;color:var(--primary-800,#1e40af)">
+                        <i class="fas fa-store"></i> You will be notified when your order is packed and ready for pickup at our store. Pickup orders use wholesale pricing where available.
+                    </div>
+                    <div class="ord-field">
+                        <span class="ord-label">Order Notes (optional)</span>
+                        <textarea name="order_notes" rows="2" class="ord-input" placeholder="Any instructions for this order (e.g. preferred delivery time, special handling)"><?= htmlspecialchars($editOrder ? ($editOrder['order_notes'] ?? '') : ($_POST['order_notes'] ?? '')) ?></textarea>
+                    </div>
+                </div>
+
+                <!-- STEP 3 -->
+                <div class="ord-panel ord-pane" data-step="3">
+                    <h2><i class="fas fa-credit-card"></i> Step 3 · Payment Method</h2>
+                    <div class="ord-pay-cards" id="payCards">
+                        <label class="ord-pay-card" data-method="cash">
+                            <input type="radio" name="payment_method" value="cash" <?= $selMethod === 'cash' ? 'checked' : '' ?>>
+                            <span class="pc-icon"><i class="fas fa-money-bill-wave"></i></span>
+                            <span class="pc-name">Cash</span>
+                            <span class="pc-sub">Pay on pickup / delivery</span>
+                        </label>
+                        <label class="ord-pay-card" data-method="bank">
+                            <input type="radio" name="payment_method" value="bank" <?= $selMethod === 'bank' ? 'checked' : '' ?>>
+                            <span class="pc-icon"><i class="fas fa-university"></i></span>
+                            <span class="pc-name">Bank Transfer</span>
+                            <span class="pc-sub">Upload transfer reference</span>
+                        </label>
+                        <?php if ($creditSalesEnabled): ?>
+                        <label class="ord-pay-card <?= $creditAvailable ? '' : 'is-disabled' ?>" data-method="credit">
+                            <input type="radio" name="payment_method" value="credit" <?= $selMethod === 'credit' ? 'checked' : '' ?> <?= $creditAvailable ? '' : 'disabled' ?>>
+                            <span class="pc-icon"><i class="fas fa-hand-holding-usd"></i></span>
+                            <span class="pc-name">Credit / Pay Later</span>
+                            <span class="pc-sub"><?= $creditAvailable ? 'Approved credit account' : 'Not available on your account' ?></span>
+                        </label>
+                        <?php endif; ?>
+                        <label class="ord-pay-card" data-method="cbe_birr">
+                            <input type="radio" name="payment_method" value="cbe_birr" <?= $selMethod === 'cbe_birr' ? 'checked' : '' ?>>
+                            <span class="pc-icon"><i class="fas fa-mobile-alt"></i></span>
+                            <span class="pc-name">CBE Birr</span>
+                            <span class="pc-sub">Mobile transfer</span>
+                        </label>
+                        <label class="ord-pay-card" data-method="telebirr">
+                            <input type="radio" name="payment_method" value="telebirr" <?= $selMethod === 'telebirr' ? 'checked' : '' ?>>
+                            <span class="pc-icon"><i class="fas fa-wallet"></i></span>
+                            <span class="pc-name">Telebirr</span>
+                            <span class="pc-sub">Mobile wallet</span>
+                        </label>
+                    </div>
+
+                    <div class="ord-paypanel" data-method="cash">
+                        <p class="ord-note-box"><i class="fas fa-info-circle" style="color:var(--primary-600,#2563eb)"></i> No advance payment is required. Your payment status stays <strong>Pending</strong> until finance receives and verifies the cash. Cash is never marked received automatically.</p>
+                        <div class="ord-field" style="margin-top:10px;margin-bottom:0">
+                            <span class="ord-label">Payment Notes (optional)</span>
+                            <input type="text" name="payment_detail" class="ord-input" placeholder="e.g. Will pay on delivery" value="<?= htmlspecialchars($editOrder ? ($editOrder['payment_detail'] ?? '') : ($_POST['payment_detail'] ?? '')) ?>">
                         </div>
                     </div>
 
-                    <div id="pf-telebirr" class="payment-fields">
-                        <div class="ord-field">
-                            <span class="ord-label">Phone Number *</span>
-                            <input type="text" name="payment_detail" class="ord-input" placeholder="09XXXXXXXX or +2519XXXXXXXX" value="<?= htmlspecialchars($editOrder ? ($editOrder['payment_detail'] ?? '') : ($_POST['payment_detail'] ?? '')) ?>">
+                    <div class="ord-paypanel" data-method="bank">
+                        <div class="ord-row">
+                            <div class="ord-field"><span class="ord-label">Bank Name</span><input type="text" name="bank_name" class="ord-input" placeholder="e.g. Commercial Bank of Ethiopia" value="<?= htmlspecialchars($editOrder ? ($editOrder['bank_name'] ?? '') : ($_POST['bank_name'] ?? '')) ?>"></div>
+                            <div class="ord-field"><span class="ord-label">Account Name</span><input type="text" name="account_name" class="ord-input" placeholder="Account holder name" value="<?= htmlspecialchars($editOrder ? ($editOrder['account_name'] ?? '') : ($_POST['account_name'] ?? '')) ?>"></div>
                         </div>
-                        <div class="ord-field">
-                            <span class="ord-label">Transaction Reference</span>
-                            <input type="text" name="transaction_ref" class="ord-input" placeholder="Telebirr transaction ID" value="<?= htmlspecialchars($editOrder ? ($editOrder['transaction_ref'] ?? '') : ($_POST['transaction_ref'] ?? '')) ?>">
+                        <div class="ord-row">
+                            <div class="ord-field"><span class="ord-label">Account Number</span><input type="text" name="account_number" class="ord-input" placeholder="Account number" value="<?= htmlspecialchars($editOrder ? ($editOrder['account_number'] ?? '') : ($_POST['account_number'] ?? '')) ?>"></div>
+                            <div class="ord-field"><span class="ord-label">Transfer Reference *</span><input type="text" name="transaction_ref" class="ord-input" placeholder="Transfer ref / receipt number" value="<?= htmlspecialchars($editOrder ? ($editOrder['transaction_ref'] ?? '') : ($_POST['transaction_ref'] ?? '')) ?>"></div>
                         </div>
-                        <div style="text-align:center;margin-top:10px;padding:16px;background:var(--neutral-100);border-radius:8px">
-                            <p style="font-size:0.82rem;color:var(--neutral-600);margin-bottom:8px">Scan to pay via Telebirr</p>
-                            <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=<?= urlencode('telebirr://pay?phone=NARED&amount=ORDER_TOTAL') ?>" alt="Telebirr QR" style="border-radius:8px;border:1px solid var(--neutral-300)">
+                        <p class="ord-note-box"><i class="fas fa-clock" style="color:#d97706"></i> Bank transfers are verified by our finance team before your order is confirmed.</p>
+                    </div>
+
+                    <div class="ord-paypanel" data-method="cbe_birr">
+                        <div class="ord-row">
+                            <div class="ord-field"><span class="ord-label">Merchant Name</span><input type="text" name="merchant_name" class="ord-input" placeholder="Merchant name" value="<?= htmlspecialchars($editOrder ? ($editOrder['merchant_name'] ?? '') : ($_POST['merchant_name'] ?? '')) ?>"></div>
+                            <div class="ord-field"><span class="ord-label">Merchant ID</span><input type="text" name="merchant_id" class="ord-input" placeholder="Merchant ID" value="<?= htmlspecialchars($editOrder ? ($editOrder['merchant_id'] ?? '') : ($_POST['merchant_id'] ?? '')) ?>"></div>
+                        </div>
+                        <div class="ord-field"><span class="ord-label">Transaction Reference *</span><input type="text" name="transaction_ref" class="ord-input" placeholder="CBE Birr transaction reference" value="<?= htmlspecialchars($editOrder ? ($editOrder['transaction_ref'] ?? '') : ($_POST['transaction_ref'] ?? '')) ?>"></div>
+                    </div>
+
+                    <div class="ord-paypanel" data-method="telebirr">
+                        <div class="ord-row">
+                            <div class="ord-field"><span class="ord-label">Phone Number *</span><input type="text" name="payment_detail" class="ord-input" placeholder="09XXXXXXXX or +2519XXXXXXXX" value="<?= htmlspecialchars($editOrder ? ($editOrder['payment_detail'] ?? '') : ($_POST['payment_detail'] ?? '')) ?>"></div>
+                            <div class="ord-field"><span class="ord-label">Transaction Reference</span><input type="text" name="transaction_ref" class="ord-input" placeholder="Telebirr transaction ID" value="<?= htmlspecialchars($editOrder ? ($editOrder['transaction_ref'] ?? '') : ($_POST['transaction_ref'] ?? '')) ?>"></div>
                         </div>
                     </div>
 
-                    <div id="pf-cash" class="payment-fields">
-                        <p style="font-size:0.85rem;color:var(--neutral-600);padding:8px 0">Pay cash at pickup or upon delivery. No advance payment details required.</p>
-                    </div>
-
-                    <div id="pf-credit" class="payment-fields">
+                    <?php if ($creditSalesEnabled): ?>
+                    <div class="ord-paypanel" data-method="credit">
                         <?php if ($creditAvailable): ?>
-                            <div style="margin-bottom:10px">
-                                <div style="display:flex;justify-content:space-between;font-size:0.82rem;margin-bottom:4px">
+                            <div style="margin-bottom:12px">
+                                <div style="display:flex;justify-content:space-between;font-size:.82rem;margin-bottom:4px">
                                     <span>Credit Used</span>
-                                    <span style="font-weight:600"><?= fmt($creditUsed) ?> / <?= fmt($creditLimit) ?></span>
+                                    <span style="font-weight:700"><?= fmt($creditUsed) ?> / <?= fmt($creditLimit) ?></span>
                                 </div>
-                                <div class="credit-bar">
-                                    <div class="credit-bar-fill" style="width:<?= min(($creditUsed / $creditLimit) * 100, 100) ?>%"></div>
-                                </div>
-                                <p style="font-size:0.78rem;color:var(--neutral-500);margin-top:4px">Available: <?= fmt(max($creditLimit - $creditUsed, 0)) ?></p>
+                                <div class="credit-bar"><div class="credit-bar-fill" style="width:<?= $creditLimit > 0 ? min(($creditUsed / $creditLimit) * 100, 100) : 0 ?>%"></div></div>
+                                <p style="font-size:.78rem;color:var(--neutral-500,#64748b);margin-top:5px">Available credit: <strong><?= fmt(max($creditLimit - $creditUsed, 0)) ?></strong></p>
                             </div>
                             <?php if ($activeAgreement): ?>
-                                <div style="border:1px solid var(--neutral-200);border-radius:10px;padding:14px;background:var(--neutral-50,#f9fafb)">
+                                <div style="border:1px solid var(--neutral-200,#e2e8f0);border-radius:10px;padding:14px;background:#fff">
                                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:8px;flex-wrap:wrap">
-                                        <strong style="font-size:0.88rem;color:var(--brown-800,#3d2c1e)"><i class="fas fa-file-contract"></i> <?= htmlspecialchars($activeAgreement['title'] ?: 'Credit Agreement') ?></strong>
-                                        <span style="background:var(--brown-100,#ebe0cc);color:var(--brown-700,#5c3d1a);font-size:0.72rem;font-weight:700;padding:2px 8px;border-radius:12px">Version <?= (int) $activeAgreement['version'] ?></span>
+                                        <strong style="font-size:.88rem;color:var(--primary-900,#1e3a5f)"><i class="fas fa-file-contract"></i> <?= htmlspecialchars($activeAgreement['title'] ?: 'Credit Agreement') ?></strong>
+                                        <span class="badge-soft">Version <?= (int) $activeAgreement['version'] ?></span>
                                     </div>
-                                    <div style="font-size:0.8rem;color:var(--neutral-600);margin-bottom:8px"><i class="fas fa-calendar-check"></i> Payment due within <strong><?= (int) $activeAgreement['payment_terms_days'] ?></strong> days of the invoice date.</div>
-                                    <div style="font-size:0.78rem;color:var(--neutral-700);line-height:1.5;max-height:180px;overflow-y:auto;white-space:pre-wrap;background:#fff;border:1px solid var(--neutral-200);border-radius:8px;padding:10px;margin-bottom:10px"><?= htmlspecialchars($activeAgreement['content']) ?></div>
+                                    <div style="font-size:.8rem;color:var(--neutral-600,#475569);margin-bottom:8px"><i class="fas fa-calendar-check"></i> Payment due within <strong><?= (int) $activeAgreement['payment_terms_days'] ?></strong> days of the invoice date.</div>
+                                    <div style="font-size:.78rem;color:#334155;line-height:1.5;max-height:180px;overflow-y:auto;white-space:pre-wrap;background:var(--neutral-50,#f8fafc);border:1px solid var(--neutral-200,#e2e8f0);border-radius:8px;padding:10px;margin-bottom:10px"><?= htmlspecialchars($activeAgreement['content']) ?></div>
                                     <?php if ($activeAgreement['require_acceptance']): ?>
-                                        <label style="display:flex;gap:8px;align-items:flex-start;font-size:0.8rem;color:var(--neutral-700);cursor:pointer">
-                                            <input type="checkbox" name="agreement_accepted" value="1" required style="margin-top:2px">
+                                        <label style="display:flex;gap:8px;align-items:flex-start;font-size:.8rem;color:#334155;cursor:pointer">
+                                            <input type="checkbox" name="agreement_accepted" value="1" required style="margin-top:2px;width:auto">
                                             <span>I have read and accept the current Credit Agreement (Version <?= (int) $activeAgreement['version'] ?>). My order is subject to these terms.</span>
                                         </label>
                                     <?php endif; ?>
                                     <input type="hidden" name="agreement_version_id" value="<?= (int) $activeAgreement['id'] ?>">
                                 </div>
                             <?php endif; ?>
-                        <?php elseif ($creditSalesEnabled): ?>
-                            <p style="font-size:0.85rem;color:var(--red-600);padding:8px 0">Credit account not available for your account. Contact admin.</p>
+                            <p class="ord-note-box" style="margin-top:10px"><i class="fas fa-info-circle" style="color:var(--primary-600,#2563eb)"></i> Credit orders are checked against your approved limit and outstanding balance. Any configured credit markup is applied once and shown in the summary.</p>
+                        <?php else: ?>
+                            <p class="ord-note-box" style="color:#b91c1c"><i class="fas fa-ban"></i> Your account is not currently approved for credit purchases. Contact finance to apply.</p>
                         <?php endif; ?>
                     </div>
+                    <?php endif; ?>
 
-                    <div class="ord-field" style="margin-top:10px">
-                        <span class="ord-label">Payment Notes</span>
-                        <textarea name="payment_detail" rows="2" class="ord-input" placeholder="Any additional payment details..."><?= htmlspecialchars($editOrder ? ($editOrder['payment_detail'] ?? '') : ($_POST['payment_detail'] ?? '')) ?></textarea>
-                    </div>
-
-                    <div class="ord-field">
-                        <span class="ord-label">Upload Payment Receipt</span>
-                        <input type="file" name="payment_screenshot" accept="image/jpeg,image/png,image/webp,image/gif" class="ord-input" style="padding:8px">
-                        <span style="font-size:0.75rem;color:var(--neutral-500)">JPEG, PNG, WebP or GIF up to 2 MB.</span>
+                    <div class="ord-paypanel" data-method="__upload" style="display:none"></div>
+                    <div class="ord-field" style="margin-top:16px">
+                        <span class="ord-label">Upload Payment Evidence (optional)</span>
+                        <input type="file" name="payment_screenshot" accept="image/jpeg,image/png,image/webp,image/gif" class="ord-input" style="padding:9px">
+                        <span style="font-size:.74rem;color:var(--neutral-500,#64748b)">JPEG, PNG, WebP or GIF up to 2 MB. Required for bank / mobile transfers where the system asks for it.</span>
                     </div>
                 </div>
 
-                <button type="submit" class="ord-submit" data-swal-exclude="true"><i class="fas fa-paper-plane"></i> <?= $editOrder ? 'Update Order' : 'Submit Order' ?></button>
+                <!-- STEP 4 -->
+                <div class="ord-panel ord-pane" data-step="4">
+                    <h2><i class="fas fa-clipboard-check"></i> Step 4 · Confirm &amp; Submit</h2>
+                    <div id="confirmReview"></div>
+                    <label class="confirm-check" style="margin-top:14px">
+                        <input type="checkbox" name="confirm_order" id="confirmOrder" value="1" required>
+                        <span>I confirm the products, quantities, delivery details and payment method above are correct and complete. I understand my order will be submitted for approval and finance verification, and that no payment is considered received until it is verified by finance.</span>
+                    </label>
+                    <div id="dupNote" style="display:none;margin-top:12px;padding:10px 12px;background:#fef2f2;border:1px solid #fecaca;border-radius:10px;color:#991b1b;font-size:.82rem"><i class="fas fa-exclamation-triangle"></i> This order was already submitted. Check My Orders.</div>
+                </div>
+
+                <div class="ord-nav">
+                    <button type="button" class="ord-btn ord-btn-ghost" id="ordBack" onclick="ordGoBack()"><i class="fas fa-arrow-left"></i> Back</button>
+                    <div style="display:flex;gap:10px;align-items:center">
+                        <button type="button" class="ord-btn ord-btn-primary" id="ordNext" onclick="ordGoNext()">Continue <i class="fas fa-arrow-right"></i></button>
+                        <button type="submit" class="ord-btn ord-btn-submit" id="ordSubmit" data-swal-exclude="true" style="display:none"><i class="fas fa-paper-plane"></i> <?= $editOrder ? 'Update Order' : 'Place Order' ?></button>
+                    </div>
+                </div>
                 <?php if ($editOrder): ?>
-                    <a href="index.php?page=my_orders" class="ord-cancel"><i class="fas fa-times"></i> Cancel Edit</a>
+                    <a href="index.php?page=my_orders" class="ord-cancel"><i class="fas fa-times"></i> Cancel edit</a>
                 <?php endif; ?>
             </div>
 
-            <div>
-                <div class="ord-panel" style="position:sticky;top:20px">
+            <aside class="ord-side">
+                <div class="ord-panel" style="margin-bottom:0">
                     <h2><i class="fas fa-receipt"></i> Order Summary</h2>
-                    <div id="summaryContent">
-                        <div class="empty-cart"><i class="fas fa-shopping-cart" style="font-size:2rem;color:var(--neutral-300);margin-bottom:8px;display:block"></i>Add products to see summary</div>
-                    </div>
+                    <div id="summaryContent"></div>
                 </div>
-            </div>
+            </aside>
         </div>
     </form>
     <?php endif; ?>
 </section>
 
 <script>
-var VAT_RATE = <?= number_format($vatRate, 2, '.', '') ?>;
+var VAT_RATE = <?= number_format((float) $vatRate, 2, '.', '') ?>;
 var CURRENCY = '<?= addslashes(SettingsService::currencySymbol()) ?>';
 var itemIndex = <?= $editOrder && !empty($editOrderItems) ? count($editOrderItems) : 1 ?>;
+var CURRENT_STEP = <?= (int) $activeStep ?>;
+var SUBMITTED = false;
 
-function switchPaymentMethod() {
-    var m = document.getElementById('paymentMethod').value;
-    document.querySelectorAll('.payment-fields').forEach(function(el) { el.classList.remove('active'); });
-    var target = document.getElementById('pf-' + m);
-    if (target) target.classList.add('active');
-    var agree = document.querySelector('input[name="agreement_accepted"]');
-    if (agree) agree.required = (m === 'credit');
-}
+function money(n){ n = isFinite(n) ? n : 0; return CURRENCY + ' ' + (Math.round(n * 100) / 100).toFixed(2); }
+function fmtNum(n){ return money(n); }
+function fmtETB(n){ return money(n); }
 
-function switchFulfillmentMethod() {
-    var m = document.getElementById('fulfillmentMethod').value;
-    var addrBlock = document.getElementById('deliveryAddressBlock');
-    var pickupInfo = document.getElementById('pickupInfoBlock');
-    var addrInput = document.getElementById('deliveryAddressInput');
-    if (m === 'pickup') {
-        if (addrBlock) addrBlock.style.display = 'none';
-        if (pickupInfo) pickupInfo.style.display = 'block';
-        if (addrInput) addrInput.required = false;
-    } else {
-        if (addrBlock) addrBlock.style.display = '';
-        if (pickupInfo) pickupInfo.style.display = 'none';
-        if (addrInput) addrInput.required = true;
-    }
-    document.querySelectorAll('.ord-item').forEach(function(row) { updatePrice(row); });
-    recalcSummary();
-}
+function isPickupLane(){ var el = document.getElementById('fulfillmentMethod'); return (el ? el.value : 'delivery') === 'pickup'; }
+function currentPayMethod(){ var r = document.querySelector('input[name="payment_method"]:checked'); return r ? r.value : 'cash'; }
 
-function isPickupLane() {
-    return (document.getElementById('fulfillmentMethod')?.value || 'delivery') === 'pickup';
-}
-
-function unitPrice(opt) {
+function unitPrice(opt){
+    if (!opt) return 0;
     var retail = parseFloat(opt.getAttribute('data-price') || 0);
     if (isPickupLane()) {
-        var wholesale = parseFloat(opt.getAttribute('data-wprice') || 0);
-        if (wholesale > 0) return wholesale;
+        var w = parseFloat(opt.getAttribute('data-wprice') || 0);
+        if (w > 0) return w;
     }
     return retail;
 }
 
-function filterProductSelects(query) {
-    var q = query.toLowerCase().trim();
-    document.querySelectorAll('.product-select').forEach(function(sel) {
-        Array.from(sel.options).forEach(function(opt) {
+function switchFulfillmentMethod(){
+    var el = document.getElementById('fulfillmentMethod');
+    var m = el ? el.value : 'delivery';
+    var addr = document.getElementById('deliveryAddressBlock');
+    var pick = document.getElementById('pickupInfoBlock');
+    var inp = document.getElementById('deliveryAddressInput');
+    if (addr) addr.style.display = (m === 'pickup') ? 'none' : '';
+    if (pick) pick.style.display = (m === 'pickup') ? '' : 'none';
+    if (inp) inp.required = (m !== 'pickup');
+    document.querySelectorAll('.ord-item').forEach(function(row){ updatePrice(row); });
+    recalcSummary();
+}
+
+function switchPaymentMethod(){
+    var m = currentPayMethod();
+    document.querySelectorAll('.ord-paypanel[data-method]').forEach(function(p){
+        var active = p.getAttribute('data-method') === m;
+        if (p.getAttribute('data-method') === '__upload') return;
+        p.classList.toggle('is-active', active);
+        p.querySelectorAll('input,select,textarea').forEach(function(el){
+            if (el.type === 'radio') return;
+            el.disabled = !active;
+        });
+    });
+    document.querySelectorAll('.ord-pay-card').forEach(function(c){
+        var mm = c.getAttribute('data-method');
+        if (mm === '__upload') return;
+        c.classList.toggle('is-selected', mm === m);
+    });
+    // Required-by-method reference fields.
+    var reqMap = { bank: ['transaction_ref'], cbe_birr: ['transaction_ref'], telebirr: ['payment_detail'] };
+    var reqs = reqMap[m] || [];
+    var panel = document.querySelector('.ord-paypanel[data-method="' + m + '"]');
+    if (panel) {
+        panel.querySelectorAll('input').forEach(function(el){
+            if (!el.name) return;
+            el.required = reqs.indexOf(el.name) !== -1;
+        });
+    }
+    var agree = document.querySelector('input[name="agreement_accepted"]');
+    if (agree) agree.required = (m === 'credit');
+    recalcSummary();
+}
+
+function filterProductSelects(query){
+    var q = (query || '').toLowerCase().trim();
+    document.querySelectorAll('.product-select').forEach(function(sel){
+        Array.from(sel.options).forEach(function(opt){
             if (!opt.value) return;
-            var searchText = (opt.getAttribute('data-search') || opt.textContent).toLowerCase();
-            opt.hidden = q !== '' && searchText.indexOf(q) === -1;
+            var text = (opt.getAttribute('data-search') || opt.textContent).toLowerCase();
+            opt.hidden = q !== '' && text.indexOf(q) === -1;
             opt.disabled = opt.hidden;
         });
         if (q !== '' && sel.value && sel.options[sel.selectedIndex].hidden) {
@@ -565,158 +747,274 @@ function filterProductSelects(query) {
     });
 }
 
-function updatePrice(row) {
+function updatePrice(row){
     if (!row) return;
     if (!row.classList || !row.classList.contains('ord-item')) row = row.closest('.ord-item');
     if (!row) return;
     var sel = row.querySelector('.product-select');
+    if (!sel) return;
     var opt = sel.options[sel.selectedIndex];
     var price = unitPrice(opt);
-    var stock = parseInt(opt.getAttribute('data-stock') || 0);
+    var stock = parseInt(opt ? (opt.getAttribute('data-stock') || 0) : 0, 10);
     var qtyInput = row.querySelector('.qty-input');
-    var qty = parseInt(qtyInput.value || 0);
+    var qty = parseInt(qtyInput.value || 0, 10);
     var disc = parseFloat(row.querySelector('.disc-input').value || 0);
     if (stock > 0) {
         qtyInput.max = stock;
+        if (qty > stock) { qtyInput.value = stock; qty = stock; }
     } else {
         qtyInput.removeAttribute('max');
     }
-    if (stock > 0 && qty > stock) {
-        qtyInput.value = stock;
-        qty = stock;
-    }
-    var lineTotal = (price * qty) - disc;
-    row.querySelector('[data-price-display]').textContent = fmtNum(price);
-    row.querySelector('[data-line-total]').textContent = fmtNum(lineTotal);
+    var priceEl = row.querySelector('[data-price-display]');
+    var totalEl = row.querySelector('[data-line-total]');
     var hint = row.querySelector('.stock-hint');
-    if (stock <= 0) {
-        row.querySelector('[data-price-display]').innerHTML = fmtNum(price) + '<br><span class="stock-low">Out of Stock</span>';
-        if (hint) hint.textContent = 'Insufficient stock available.';
-    } else if (stock <= 10) {
-        row.querySelector('[data-price-display]').innerHTML = fmtNum(price) + '<br><span class="stock-low">Only ' + stock + ' left</span>';
-        if (hint) hint.textContent = 'Max order qty: ' + stock;
+    if (!sel.value) {
+        if (priceEl) priceEl.textContent = '—';
+        if (totalEl) totalEl.textContent = '—';
+        if (hint) hint.textContent = '';
     } else {
-        if (hint) hint.textContent = 'Max order qty: ' + stock;
+        if (priceEl) priceEl.textContent = money(price);
+        if (totalEl) totalEl.textContent = money((price * qty) - disc);
+        if (hint) hint.innerHTML = (stock > 0) ? '<span class="ord-in"><i class="fas fa-check"></i> In stock</span>' : '<span class="ord-out"><i class="fas fa-times"></i> Out of stock</span>';
     }
     recalcSummary();
 }
 
-function recalcSummary() {
-    var items = document.querySelectorAll('.ord-item');
-    var subtotal = 0, totalDisc = 0, totalQty = 0, itemCount = 0;
-    items.forEach(function(row) {
+function recalcSummary(){
+    var rows = document.querySelectorAll('.ord-item');
+    var subtotal = 0, totalLineDisc = 0, totalQty = 0, itemCount = 0;
+    rows.forEach(function(row){
         var sel = row.querySelector('.product-select');
         if (!sel || !sel.value) return;
         var opt = sel.options[sel.selectedIndex];
-        var price = unitPrice(opt);
-        var qty = parseInt(row.querySelector('.qty-input').value || 0);
-        var disc = parseFloat(row.querySelector('.disc-input').value || 0);
-        subtotal += price * qty;
-        totalDisc += disc;
+        var qty = parseInt(row.querySelector('.qty-input').value || 0, 10);
+        if (qty <= 0) return;
+        subtotal += unitPrice(opt) * qty;
+        totalLineDisc += parseFloat(row.querySelector('.disc-input').value || 0);
         totalQty += qty;
         itemCount++;
     });
-    var discPct = parseFloat(document.getElementById('discountPercent')?.value || 0);
-    if (discPct > 0 && discPct <= 100) {
-        totalDisc = Math.round(subtotal * discPct / 100 * 100) / 100;
-    }
+    var discPct = parseFloat(document.getElementById('discountPercent').value || 0);
+    var totalDisc = totalLineDisc;
+    if (discPct > 0 && discPct <= 100) totalDisc = Math.round(subtotal * discPct) / 100;
     var taxable = Math.max(subtotal - totalDisc, 0);
-    var vat = Math.round(taxable * VAT_RATE / 100 * 100) / 100;
+    var vat = Math.round(taxable * VAT_RATE) / 100;
     var grand = taxable + vat;
-    var html = '';
+    var el = document.getElementById('summaryContent');
+    if (!el) return;
     if (itemCount === 0) {
-        html = '<div class="empty-cart"><i class="fas fa-shopping-cart" style="font-size:2rem;color:var(--neutral-300);margin-bottom:8px;display:block"></i>Add products to see summary</div>';
-    } else {
-        html += '<div class="summary-row"><span>Items</span><span>' + itemCount + ' products (' + totalQty + ' units)</span></div>';
-        html += '<div class="summary-row"><span>Subtotal</span><span>' + fmtETB(subtotal) + '</span></div>';
-        if (totalDisc > 0) html += '<div class="summary-row" style="color:var(--red-600)"><span>Discount</span><span>- ' + fmtETB(totalDisc) + '</span></div>';
-        html += '<div class="summary-row"><span>VAT (' + VAT_RATE + '%)</span><span>' + fmtETB(vat) + '</span></div>';
-        html += '<div class="summary-row total"><span>Grand Total</span><span>' + fmtETB(grand) + '</span></div>';
-        var pm = document.getElementById('paymentMethod')?.value || 'cash';
-        html += '<div style="margin-top:12px;padding:10px;background:var(--neutral-50);border-radius:8px;font-size:0.82rem">';
-        html += '<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="color:var(--neutral-500)">Payment</span><span style="font-weight:600">' + pm.replace('_', ' ').replace(/\b\w/g, function(l){ return l.toUpperCase(); }) + '</span></div>';
-        html += '<div style="display:flex;justify-content:space-between"><span style="color:var(--neutral-500)">Status</span><span style="color:var(--orange-600);font-weight:600">Pending Verification</span></div>';
-        html += '</div>';
+        el.innerHTML = '<div class="ord-empty"><i class="fas fa-shopping-basket"></i>Add products to see your summary</div>';
+        return;
     }
-    document.getElementById('summaryContent').innerHTML = html;
+    var pmLabels = { cash: 'Cash', bank: 'Bank Transfer', cbe_birr: 'CBE Birr', telebirr: 'Telebirr', credit: 'Credit / Pay Later' };
+    var pm = currentPayMethod();
+    var html = '';
+    html += '<div class="summary-row"><span>Items</span><span>' + itemCount + ' product' + (itemCount > 1 ? 's' : '') + ' · ' + totalQty + ' unit' + (totalQty > 1 ? 's' : '') + '</span></div>';
+    html += '<div class="summary-row"><span>Subtotal</span><span>' + money(subtotal) + '</span></div>';
+    if (totalDisc > 0) html += '<div class="summary-row" style="color:#dc2626"><span>Discount</span><span style="color:#dc2626">- ' + money(totalDisc) + '</span></div>';
+    html += '<div class="summary-row"><span>VAT (' + VAT_RATE + '%)</span><span>' + money(vat) + '</span></div>';
+    html += '<div class="summary-row total"><span>Total (ETB)</span><span>' + money(grand) + '</span></div>';
+    html += '<div style="margin-top:12px;padding:11px;background:var(--neutral-50,#f8fafc);border-radius:10px;font-size:.8rem">';
+    html += '<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="color:var(--neutral-500,#64748b)">Fulfillment</span><span style="font-weight:700">' + (isPickupLane() ? 'Pickup' : 'Delivery') + '</span></div>';
+    html += '<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="color:var(--neutral-500,#64748b)">Payment</span><span style="font-weight:700">' + (pmLabels[pm] || pm) + '</span></div>';
+    html += '<div style="display:flex;justify-content:space-between"><span style="color:var(--neutral-500,#64748b)">Status</span><span style="color:#b45309;font-weight:700">Pending verification</span></div>';
+    html += '</div>';
+    el.innerHTML = html;
 }
 
-function addItem() {
+function addItem(){
     var container = document.getElementById('orderItems');
-    var idx = itemIndex++;
-    var options = '<option value="">Select product</option>';
     var firstSel = document.querySelector('.product-select');
-    if (firstSel) {
-        Array.from(firstSel.options).forEach(function(opt) {
-            if (!opt.value) return;
-            var txt = opt.textContent.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-            var searchText = (opt.getAttribute('data-search') || '').replace(/"/g,'&quot;');
-            options += '<option value="' + opt.value + '" data-price="' + opt.getAttribute('data-price') + '" data-wprice="' + opt.getAttribute('data-wprice') + '" data-stock="' + opt.getAttribute('data-stock') + '" data-search="' + searchText + '">' + txt + '</option>';
-        });
-    }
+    if (!container || !firstSel) return;
+    var idx = itemIndex++;
+    var optionsHtml = firstSel.innerHTML.replace(/ selected(="[^"]*")?/g, '');
     var html = '<div class="ord-item" data-index="' + idx + '">';
-    html += '<div style="margin-bottom:6px"><select name="request_items[' + idx + '][product_id]" class="ord-sel product-select" required onchange="updatePrice(this.closest(\'.ord-item\'))">' + options + '</select></div>';
-    html += '<div class="ord-item-bottom">';
-    html += '<div><span class="ord-label">Quantity</span><input type="number" name="request_items[' + idx + '][quantity]" value="1" min="1" class="ord-input qty-input" onchange="updatePrice(this.closest(\'.ord-item\'))" onkeyup="updatePrice(this.closest(\'.ord-item\'))" required><div class="stock-hint stock-ok" style="margin-top:4px"></div></div>';
-    html += '<div><span class="ord-label">Unit Price</span><div class="ord-input" style="background:var(--neutral-100);border-style:dashed;display:flex;align-items:center;height:42px" data-price-display>0</div></div>';
-    html += '<div><span class="ord-label">Discount (ETB)</span><input type="number" name="request_items[' + idx + '][line_discount]" value="0" min="0" step="0.01" class="ord-input disc-input" onchange="updatePrice(this.closest(\'.ord-item\'))" onkeyup="updatePrice(this.closest(\'.ord-item\'))"></div>';
-    html += '<div><span class="ord-label">Line Total</span><div class="line-total" data-line-total>0</div></div>';
-    html += '<button type="button" class="ord-item-remove" onclick="removeItem(this)"><i class="fas fa-times"></i></button>';
+    html += '<div class="ord-item-head"><select name="request_items[' + idx + '][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)">' + optionsHtml + '</select>';
+    html += '<button type="button" class="ord-item-remove" onclick="removeItem(this)" title="Remove product"><i class="fas fa-trash-alt"></i></button></div>';
+    html += '<div class="ord-item-grid">';
+    html += '<div class="ord-field"><span class="ord-label">Quantity</span><input type="number" name="request_items[' + idx + '][quantity]" value="1" min="1" class="ord-input qty-input" onchange="updatePrice(this.closest(\'.ord-item\'))" onkeyup="updatePrice(this.closest(\'.ord-item\'))" required><div class="stock-hint"></div></div>';
+    html += '<div class="ord-field"><span class="ord-label">Unit Price</span><div class="ord-static" data-price-display>—</div></div>';
+    html += '<div class="ord-field"><span class="ord-label">Line Discount (ETB)</span><input type="number" name="request_items[' + idx + '][line_discount]" value="0" min="0" step="0.01" class="ord-input disc-input" onchange="updatePrice(this.closest(\'.ord-item\'))" onkeyup="updatePrice(this.closest(\'.ord-item\'))"></div>';
+    html += '<div class="ord-field"><span class="ord-label">Line Total</span><div class="ord-static ord-line-total" data-line-total>—</div></div>';
     html += '</div></div>';
     container.insertAdjacentHTML('beforeend', html);
-    var searchVal = document.getElementById('productSearch')?.value || '';
+    var searchVal = document.getElementById('productSearch') ? document.getElementById('productSearch').value : '';
     if (searchVal) filterProductSelects(searchVal);
     recalcSummary();
 }
 
-function removeItem(btn) {
+function removeItem(btn){
     var items = document.querySelectorAll('.ord-item');
-    if (items.length <= 1) { alert('You need at least one product.'); return; }
+    if (items.length <= 1) { showMsg('You need at least one product in the order.', 'error'); return; }
     btn.closest('.ord-item').remove();
     recalcSummary();
 }
 
-function fmtNum(n) { return CURRENCY + ' ' + n.toFixed(2); }
-function fmtETB(n) { return CURRENCY + ' ' + n.toFixed(2); }
+function showMsg(msg, type){
+    if (typeof showToast === 'function') { try { showToast(msg, type || 'info'); return; } catch (e) {} }
+    alert(msg);
+}
 
-document.addEventListener('DOMContentLoaded', function() {
+function ordShowStep(n){
+    CURRENT_STEP = n;
+    document.querySelectorAll('.ord-pane[data-step]').forEach(function(p){
+        p.classList.toggle('is-active', parseInt(p.getAttribute('data-step'), 10) === n);
+    });
+    document.querySelectorAll('.ord-step-item').forEach(function(s){
+        var sn = parseInt(s.getAttribute('data-step'), 10);
+        s.classList.toggle('is-active', sn === n);
+        s.classList.toggle('is-done', sn < n);
+    });
+    var back = document.getElementById('ordBack');
+    var next = document.getElementById('ordNext');
+    var submit = document.getElementById('ordSubmit');
+    if (back) back.style.visibility = n > 1 ? 'visible' : 'hidden';
+    if (next) next.style.display = n < 4 ? '' : 'none';
+    if (submit) submit.style.display = n === 4 ? '' : 'none';
+    var cs = document.getElementById('current_step');
+    if (cs) cs.value = n;
+    if (n === 4) buildConfirmation();
+    var main = document.getElementById('ordMain');
+    if (main) { try { window.scrollTo({ top: Math.max(main.offsetTop - 70, 0), behavior: 'smooth' }); } catch (e) { window.scrollTo(0, 0); } }
+}
+
+function ordValidateStep(step){
+    var pane = document.querySelector('.ord-pane[data-step="' + step + '"]');
+    if (!pane) return true;
+    var ok = true, first = null;
+    pane.querySelectorAll('input,select,textarea').forEach(function(el){
+        if (el.disabled || el.type === 'radio') return;
+        if (!el.checkValidity()) {
+            ok = false;
+            el.classList.add('ord-invalid');
+            if (!first) first = el;
+        } else {
+            el.classList.remove('ord-invalid');
+        }
+    });
+    if (step === 3 && !document.querySelector('input[name="payment_method"]:checked')) {
+        ok = false;
+        showMsg('Please choose a payment method.', 'error');
+    }
+    if (!ok) {
+        if (first) { first.scrollIntoView({ behavior: 'smooth', block: 'center' }); try { first.focus(); } catch (e) {} }
+        if (first || step !== 3) showMsg('Please complete the highlighted fields before continuing.', 'error');
+    }
+    return ok;
+}
+
+function ordGoNext(){
+    if (!ordValidateStep(CURRENT_STEP)) return;
+    ordShowStep(Math.min(4, CURRENT_STEP + 1));
+}
+function ordGoBack(){ ordShowStep(Math.max(1, CURRENT_STEP - 1)); }
+
+function buildConfirmation(){
+    var rows = document.querySelectorAll('.ord-item');
+    var html = '';
+    var lines = '';
+    var subtotal = 0, totalLineDisc = 0, totalQty = 0, itemCount = 0;
+    rows.forEach(function(row){
+        var sel = row.querySelector('.product-select');
+        if (!sel || !sel.value) return;
+        var opt = sel.options[sel.selectedIndex];
+        var qty = parseInt(row.querySelector('.qty-input').value || 0, 10);
+        if (qty <= 0) return;
+        var price = unitPrice(opt);
+        var disc = parseFloat(row.querySelector('.disc-input').value || 0);
+        subtotal += price * qty; totalLineDisc += disc; totalQty += qty; itemCount++;
+        var meta = [opt.getAttribute('data-generic'), opt.getAttribute('data-strength'), opt.getAttribute('data-form')].filter(Boolean).join(' · ');
+        lines += '<tr><td><strong>' + esc(opt.getAttribute('data-name') || opt.textContent) + '</strong>' + (meta ? '<div style="font-size:.72rem;color:#64748b">' + esc(meta) + '</div>' : '') + '</td>';
+        lines += '<td>' + qty + '</td><td>' + money(price) + '</td><td style="font-weight:700">' + money(price * qty - disc) + '</td></tr>';
+    });
+    if (itemCount === 0) { html = '<div class="ord-empty">No products selected.</div>'; }
+    else {
+        var discPct = parseFloat(document.getElementById('discountPercent').value || 0);
+        var totalDisc = totalLineDisc;
+        if (discPct > 0 && discPct <= 100) totalDisc = Math.round(subtotal * discPct) / 100;
+        var taxable = Math.max(subtotal - totalDisc, 0);
+        var vat = Math.round(taxable * VAT_RATE) / 100;
+        var grand = taxable + vat;
+        var pmLabels = { cash: 'Cash', bank: 'Bank Transfer', cbe_birr: 'CBE Birr', telebirr: 'Telebirr', credit: 'Credit / Pay Later' };
+        var pm = currentPayMethod();
+        html += '<div class="ord-review-tbl-wrap" style="overflow-x:auto"><table class="ord-review-tbl"><thead><tr><th>Product</th><th>Qty</th><th>Unit Price</th><th>Line Total</th></tr></thead><tbody>' + lines + '</tbody></table></div>';
+        html += '<div class="summary-row"><span>Subtotal</span><span>' + money(subtotal) + '</span></div>';
+        if (totalDisc > 0) html += '<div class="summary-row" style="color:#dc2626"><span>Discount</span><span style="color:#dc2626">- ' + money(totalDisc) + '</span></div>';
+        html += '<div class="summary-row"><span>VAT (' + VAT_RATE + '%)</span><span>' + money(vat) + '</span></div>';
+        html += '<div class="summary-row total"><span>Total (ETB)</span><span>' + money(grand) + '</span></div>';
+        // Delivery
+        var ful = isPickupLane() ? 'Pickup from store' : 'Delivery';
+        var addr = (document.getElementById('deliveryAddressInput') || {}).value || '';
+        var notes = (document.querySelector('textarea[name="order_notes"]') || {}).value || '';
+        html += '<div style="margin-top:14px;padding:12px;border:1px solid var(--neutral-200,#e2e8f0);border-radius:10px;font-size:.82rem">';
+        html += '<div style="font-weight:800;color:var(--primary-900,#1e3a5f);margin-bottom:6px"><i class="fas fa-truck"></i> Delivery Details</div>';
+        html += '<div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#64748b">Method</span><span style="font-weight:700">' + esc(ful) + '</span></div>';
+        if (!isPickupLane()) html += '<div style="display:flex;justify-content:space-between;padding:2px 0;gap:12px"><span style="color:#64748b">Address</span><span style="font-weight:600;text-align:right">' + esc(addr || '—') + '</span></div>';
+        if (notes.trim() !== '') html += '<div style="display:flex;justify-content:space-between;padding:2px 0;gap:12px"><span style="color:#64748b">Notes</span><span style="font-weight:600;text-align:right">' + esc(notes) + '</span></div>';
+        html += '</div>';
+        // Payment
+        var ref = (document.querySelector('.ord-paypanel[data-method="' + pm + '"] input[name="transaction_ref"]') || {}).value || '';
+        html += '<div style="margin-top:10px;padding:12px;border:1px solid var(--neutral-200,#e2e8f0);border-radius:10px;font-size:.82rem">';
+        html += '<div style="font-weight:800;color:var(--primary-900,#1e3a5f);margin-bottom:6px"><i class="fas fa-credit-card"></i> Payment</div>';
+        html += '<div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#64748b">Method</span><span style="font-weight:700">' + esc(pmLabels[pm] || pm) + '</span></div>';
+        if (ref) html += '<div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#64748b">Reference</span><span style="font-weight:600">' + esc(ref) + '</span></div>';
+        html += '<div style="display:flex;justify-content:space-between;padding:2px 0"><span style="color:#64748b">Status</span><span style="color:#b45309;font-weight:700">Pending finance verification</span></div>';
+        html += '</div>';
+    }
+    document.getElementById('confirmReview').innerHTML = html;
+}
+function esc(s){ return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+document.addEventListener('DOMContentLoaded', function(){
+    // Payment cards click -> switch panel.
+    document.querySelectorAll('.ord-pay-card').forEach(function(card){
+        card.addEventListener('click', function(){
+            var radio = card.querySelector('input[type="radio"]');
+            if (radio && !radio.disabled) { radio.checked = true; switchPaymentMethod(); }
+        });
+    });
+    document.querySelectorAll('input[name="payment_method"]').forEach(function(r){
+        r.addEventListener('change', switchPaymentMethod);
+    });
+
     switchPaymentMethod();
     switchFulfillmentMethod();
-    document.querySelectorAll('.ord-item').forEach(function(row) { updatePrice(row); });
+    document.querySelectorAll('.ord-item').forEach(function(row){ updatePrice(row); });
     recalcSummary();
+    ordShowStep(CURRENT_STEP);
 
-    // Ensure the Submit/Update Order button gives clear feedback instead of failing
-    // silently when a required field is empty (browser validation bubble can be easy
-    // to miss, especially for fields below the fold or inside hidden panels).
+    <?php if ($duplicateSubmit): ?>
+    var dn = document.getElementById('dupNote'); if (dn) dn.style.display = 'block';
+    <?php endif; ?>
+
+    // Final submit: guard against duplicate submissions + clear messaging.
     var orderForm = document.getElementById('orderForm');
     if (orderForm) {
-        orderForm.addEventListener('submit', function(e) {
-            if (!orderForm.checkValidity()) {
+        orderForm.addEventListener('submit', function(e){
+            if (SUBMITTED) { e.preventDefault(); return; }
+            // Validate every visible required field across all steps.
+            var invalid = null;
+            ['1','2','3'].forEach(function(s){
+                var pane = document.querySelector('.ord-pane[data-step="' + s + '"]');
+                if (!pane) return;
+                pane.querySelectorAll('input,select,textarea').forEach(function(el){
+                    if (el.disabled || el.type === 'radio') return;
+                    if (!el.checkValidity()) { el.classList.add('ord-invalid'); if (!invalid) { invalid = el; invalid.setAttribute('data-bad-step', s); } }
+                    else el.classList.remove('ord-invalid');
+                });
+            });
+            var confirmEl = document.getElementById('confirmOrder');
+            if (confirmEl && !confirmEl.checked) { invalid = confirmEl; }
+            if (invalid) {
                 e.preventDefault();
-                var firstInvalid = orderForm.querySelector('.ord-item select:invalid, .ord-item input:invalid, textarea:invalid, select:invalid, input:required:invalid');
-                if (firstInvalid) {
-                    firstInvalid.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    firstInvalid.focus();
-                    firstInvalid.style.outline = '2px solid #dc2626';
-                    setTimeout(function() { firstInvalid.style.outline = ''; }, 1600);
-                }
-                var missing = function(el) {
-                    var friendly = { agreement_accepted: 'ticking the Credit Agreement acceptance box' };
-                    if (friendly[el.name]) return 'Please complete: ' + friendly[el.name];
-                    var field = el.closest('.ord-field');
-                    var lbl = field ? field.querySelector('.ord-label') : el.closest('label');
-                    var txt = lbl ? lbl.textContent.trim().split('\n')[0].trim() : '';
-                    if (txt.length > 1) return 'Please complete: ' + txt;
-                    return 'Please complete: ' + el.name.replace(/request_items\[\d+\]\[/g, '').replace(/[\[\]]/g, '').replace(/_/g, ' ');
-                };
-                var msg = firstInvalid ? missing(firstInvalid) : 'Please complete all required fields before submitting.';
-                if (typeof showToast === 'function') {
-                    try { showToast(msg, 'error'); }
-                    catch (err) { alert('Please complete all required fields before submitting.'); }
-                } else {
-                    alert('Please complete all required fields before submitting.');
-                }
+                var step = parseInt(invalid.getAttribute('data-bad-step') || '4', 10);
+                if (CURRENT_STEP !== step) ordShowStep(step);
+                showMsg('Please complete the highlighted fields before placing your order.', 'error');
+                return;
             }
+            SUBMITTED = true;
+            var btn = document.getElementById('ordSubmit');
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...'; }
         });
     }
 });

@@ -229,12 +229,17 @@
     var submitter = e.submitter;
     if (submitter && submitter.dataset.swalExclude === 'true') return;
 
-    /* Re-dispatch after a confirmed dialog: let ajax-interceptor handle it. */
+    /* Re-dispatch after a confirmed dialog: let ajax-interceptor handle it.
+       IMPORTANT: do NOT call form.requestSubmit() from here.  This handler runs
+       *during* the submit event, and the HTML spec ignores re-entrant
+       requestSubmit() calls while submission events are firing, so the nested
+       call is a no-op.  Calling e.preventDefault() afterwards would then cancel
+       the only real submission and silently drop the user's action (the "form
+       shows, but Create/Submit does nothing" bug).  Just clear the flag and
+       return without preventing default so the event bubbles on to
+       ajax-interceptor (or falls back to a normal native submit). */
     if (form.dataset.swalDone === 'true') {
       delete form.dataset.swalDone;
-      submitting = true;
-      try { form.requestSubmit(submitter || undefined); } finally { submitting = false; }
-      e.preventDefault();
       return;
     }
 

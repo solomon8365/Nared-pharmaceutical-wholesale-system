@@ -9,6 +9,10 @@ $products = $pdo->query('SELECT id, name, stock_quantity, purchase_price FROM pr
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     require_csrf();
+    // Every physical-count mutation (create, update items, complete, cancel,
+    // reverse) adjusts stock, so it requires the create permission. Previously
+    // only 'create' was checked and complete/reverse/cancel were unprotected.
+    requirePermission('physical_count', 'create');
     $action = $_POST['_action'] ?? '';
 
     if ($action === 'create') {
