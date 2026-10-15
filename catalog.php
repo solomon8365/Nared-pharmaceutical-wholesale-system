@@ -385,7 +385,7 @@ $tabFrequentIds = array_column($frequentlyOrdered, 'id');
     ?>
     <div class="cat-list-card">
         <div class="cat-list-img">
-            <?php if (!empty($p['image_path']) && file_exists(__DIR__.'/../uploads/products/'.$p['image_path'])): ?><img src="<?= PRODUCT_UPLOAD_URL.'/'.htmlspecialchars($p['image_path']) ?>" alt=""><?php else: ?><span class="no-img"><i class="fas fa-pills"></i></span><?php endif; ?>
+            <?php if (storage_exists($p['image_path'], 'products')): ?><img src="<?= htmlspecialchars(storage_url($p['image_path'], 'products')) ?>" alt=""><?php else: ?><span class="no-img"><i class="fas fa-pills"></i></span><?php endif; ?>
         </div>
         <div class="cat-list-info">
             <div class="cat-list-name"><?= htmlspecialchars($p['name']) ?></div>
@@ -421,7 +421,7 @@ $tabFrequentIds = array_column($frequentlyOrdered, 'id');
         $pid=(int)$p['id']; $stock=(int)$p['stock_quantity']; $sb=stockBadge($stock); $pct=stockPct($stock);
         $isFav=in_array($pid,$favIds); $isCmp=in_array($pid,$compareIds); $isFrq=in_array($pid,$tabFrequentIds);
         $earliest=$expiryMap[$pid]??null; $expSoon=($earliest && $stock>0 && strtotime($earliest) <= strtotime('+90 days'));
-        $imgFull = (!empty($p['image_path']) && file_exists(__DIR__.'/../uploads/products/'.$p['image_path'])) ? PRODUCT_UPLOAD_URL.'/'.htmlspecialchars($p['image_path']) : '';
+        $imgFull = storage_exists($p['image_path'], 'products') ? htmlspecialchars(storage_url($p['image_path'], 'products')) : '';
     ?>
     <div class="cat-card" onclick="showCatDetail(this)" data-pid="<?= $pid ?>" data-name="<?= htmlspecialchars($p['name']) ?>" data-brand="<?= htmlspecialchars($p['brand']??'') ?>" data-generic="<?= htmlspecialchars($p['generic_name']??'') ?>" data-barcode="<?= htmlspecialchars($p['barcode']??'') ?>" data-dosage="<?= htmlspecialchars($p['dosage_form']??'') ?>" data-strength="<?= htmlspecialchars($p['strength']??'') ?>" data-mfr="<?= htmlspecialchars($p['manufacturer']??'') ?>" data-category="<?= htmlspecialchars($p['category_name']??'') ?>" data-price="<?= fmt((float)$p['price']) ?>" data-stock="<?= $stock <= 0 ? 0 : ($stock <= 10 ? 5 : 50) ?>" data-pack="<?= htmlspecialchars($p['pack_size']??'') ?>" data-unit="<?= htmlspecialchars($p['unit_of_measure']??'') ?>" data-country="<?= htmlspecialchars($p['country_of_origin']??'') ?>" data-storage="<?= htmlspecialchars($p['storage_condition']??'') ?>" data-desc="<?= htmlspecialchars($p['description']??'') ?>" data-image="<?= $imgFull ?>" data-mfg="<?= htmlspecialchars($p['manufacturing_date']??'') ?>" data-rx="<?= (int)($p['requires_prescription']??0) ?>" data-batches="<?= buildBatchJson($batchMap,$pid) ?>">
         <div class="cat-card-top">
@@ -431,7 +431,7 @@ $tabFrequentIds = array_column($frequentlyOrdered, 'id');
             <?php endif; ?>
         </div>
         <div class="cat-card-img">
-            <?php if (!empty($p['image_path']) && file_exists(__DIR__.'/../uploads/products/'.$p['image_path'])): ?><img src="<?= PRODUCT_UPLOAD_URL.'/'.htmlspecialchars($p['image_path']) ?>" alt=""><?php else: ?><span class="no-img"><i class="fas fa-pills"></i></span><?php endif; ?>
+            <?php if (storage_exists($p['image_path'], 'products')): ?><img src="<?= htmlspecialchars(storage_url($p['image_path'], 'products')) ?>" alt=""><?php else: ?><span class="no-img"><i class="fas fa-pills"></i></span><?php endif; ?>
             <div class="cat-card-badge">
                 <span class="cat-badge <?= $sb[1] ?>"><i class="fas <?= $sb[2] ?>"></i> <?= $sb[0] ?></span>
                 <?php if ($expSoon): ?><span class="cat-badge exp"><i class="fas fa-hourglass-half"></i> Exp <?= date('M Y', strtotime($earliest)) ?></span><?php endif; ?>

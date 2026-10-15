@@ -45,16 +45,11 @@ function store_product_image(array $file, int $productId): ?string
     }
     $ext = $map[$mime];
 
-    $dir = PRODUCT_UPLOAD_DIR;
-    if (!is_dir($dir) && !mkdir($dir, 0755, true) && !is_dir($dir)) {
-        throw new RuntimeException('Could not create upload directory.');
-    }
-
     $basename = 'product_' . $productId . '.' . $ext;
-    $dest = $dir . DIRECTORY_SEPARATOR . $basename;
-    if (!move_uploaded_file($tmp, $dest)) {
+    $stored = storage_put($tmp, 'products', $basename, $mime);
+    if ($stored === null) {
         throw new RuntimeException('Could not save image.');
     }
 
-    return PRODUCT_UPLOAD_URL . '/' . $basename;
+    return $stored;
 }

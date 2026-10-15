@@ -549,7 +549,7 @@ function openProductDetail(b) {
     var sc = statusColors[b.status] || ['var(--neutral-500)', b.status];
     document.getElementById('pd-status').innerHTML = '<span class="exp-badge" style="background:' + sc[0] + ';color:#fff">' + sc[1] + '</span>';
     var img = document.getElementById('pd-img'), icon = document.getElementById('pd-img-icon');
-    if (b.image_path) { img.src = '../' + b.image_path; img.style.display = 'block'; icon.style.display = 'none'; }
+    if (b.image_path) { var ip = b.image_path; img.src = /^https?:\/\//i.test(ip) ? ip : (ip.indexOf('uploads/') === 0 ? ip : 'uploads/products/' + ip); img.style.display = 'block'; icon.style.display = 'none'; }
     else { img.style.display = 'none'; icon.style.display = ''; }
     var desc = b.description || '';
     var dw = document.getElementById('pd-desc-wrap');

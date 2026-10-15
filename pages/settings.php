@@ -93,11 +93,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         saveKeys($pdo, $upsert, ['company_name','company_address','company_phone','company_email','website_url','currency','timezone','language'], $errors);
         if (!empty($_FILES['company_logo']['tmp_name'])) {
             $ext = pathinfo($_FILES['company_logo']['name'], PATHINFO_EXTENSION);
-            $file = 'uploads/' . 'logo_' . time() . '.' . $ext;
-            $dir = __DIR__ . '/../' . dirname($file);
-            if (!is_dir($dir)) mkdir($dir, 0777, true);
-            if (move_uploaded_file($_FILES['company_logo']['tmp_name'], __DIR__ . '/../' . $file)) {
-                $upsert->execute(['k' => 'company_logo', 'v' => $file, 'v2' => $file]);
+            $logoName = 'logo_' . time() . '.' . $ext;
+            $logoStored = storage_put($_FILES['company_logo']['tmp_name'], '', $logoName);
+            if ($logoStored !== null) {
+                $upsert->execute(['k' => 'company_logo', 'v' => $logoStored, 'v2' => $logoStored]);
             }
         }
         doSave($messages, $errors, $upsert);

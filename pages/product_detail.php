@@ -131,7 +131,7 @@ $activeTab = $_GET['tab'] ?? 'overview';
 
     <div class="pd-hero">
         <?php if (!empty($product['image_path'])): ?>
-            <img src="<?= htmlspecialchars($product['image_path']) ?>" alt="" style="width:120px;height:120px;border-radius:14px;object-fit:cover;border:2px solid #e2e8f0">
+            <img src="<?= htmlspecialchars(storage_url($product['image_path'], 'products')) ?>" alt="" style="width:120px;height:120px;border-radius:14px;object-fit:cover;border:2px solid #e2e8f0">
         <?php else: ?>
             <div class="pd-hero-img"><i class="fas fa-pills"></i></div>
         <?php endif; ?>

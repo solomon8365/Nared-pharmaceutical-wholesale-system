@@ -262,13 +262,9 @@ function delUploadPodPhoto(): ?string {
     if (!in_array($ext, $allowed, true)) {
         return false;
     }
-    $dir = __DIR__ . '/../uploads/pod';
-    if (!is_dir($dir)) @mkdir($dir, 0777, true);
-    $path = 'uploads/pod/' . date('Ymd_His') . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
-    if (!move_uploaded_file($file['tmp_name'], __DIR__ . '/../' . $path)) {
-        return false;
-    }
-    return $path;
+    $name = date('Ymd_His') . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
+    $stored = storage_put($file['tmp_name'], 'pod', $name);
+    return $stored === null ? false : $stored;
 }
 
 function delBadgeHtml(string $status): string {

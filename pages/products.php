@@ -622,7 +622,7 @@ $showAddModal = isset($_GET['add']);
                     <td>
                         <div class="erp-prod-cell">
                             <?php if (!empty($product['image_path'])): ?>
-                                <img src="<?= htmlspecialchars($product['image_path']) ?>" alt="" class="erp-prod-thumb">
+                                <img src="<?= htmlspecialchars(storage_url($product['image_path'], 'products')) ?>" alt="" class="erp-prod-thumb">
                             <?php else: ?>
                                 <div class="erp-prod-thumb-placeholder"><i class="fas fa-pills"></i></div>
                             <?php endif; ?>

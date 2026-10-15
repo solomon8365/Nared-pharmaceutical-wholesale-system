@@ -102,10 +102,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $cid !== null) {
             finfo_close($finfo);
             if (!in_array($mime, $allowed, true)) throw new RuntimeException('Payment receipt must be JPEG, PNG, WebP or GIF.');
             if ($file['size'] > MAX_UPLOAD_SIZE) throw new RuntimeException('Receipt too large (max 2 MB).');
-            if (!is_dir(PAYMENT_UPLOAD_DIR)) mkdir(PAYMENT_UPLOAD_DIR, 0755, true);
-            do { $fname = 'order_' . bin2hex(random_bytes(8)) . '.' . $extMap[$mime]; $dest = PAYMENT_UPLOAD_DIR . DIRECTORY_SEPARATOR . $fname; } while (file_exists($dest));
-            if (!move_uploaded_file($file['tmp_name'], $dest)) throw new RuntimeException('Failed to save receipt.');
-            $screenshotPath = PAYMENT_UPLOAD_URL . '/' . $fname;
+            do { $fname = 'order_' . bin2hex(random_bytes(8)) . '.' . $extMap[$mime]; } while (is_file(PAYMENT_UPLOAD_DIR . DIRECTORY_SEPARATOR . $fname));
+            $screenshotPath = storage_put($file['tmp_name'], 'payments', $fname, $mime);
+            if ($screenshotPath === null) throw new RuntimeException('Failed to save receipt.');
             $uploadedNew = true;
         }
 

@@ -44,11 +44,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             } elseif ($_FILES['payment_receipt']['size'] > 5 * 1024 * 1024) {
                                 $messages[] = ['type' => 'error', 'text' => 'Receipt file must be under 5MB.'];
                             } else {
-                                $uploadDir = __DIR__ . '/../uploads/';
-                                if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
                                 $ext = strtolower(pathinfo($_FILES['payment_receipt']['name'], PATHINFO_EXTENSION));
-                                $receiptPath = 'payment_receipt_' . $poId . '_' . time() . '.' . $ext;
-                                move_uploaded_file($_FILES['payment_receipt']['tmp_name'], $uploadDir . $receiptPath);
+                                $receiptName = 'payment_receipt_' . $poId . '_' . time() . '.' . $ext;
+                                $receiptPath = storage_put($_FILES['payment_receipt']['tmp_name'], '', $receiptName) ?? '';
                             }
                         }
 

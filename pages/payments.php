@@ -915,20 +915,13 @@ function payment_store_upload(array $file, ?string &$error): ?string
         $error = 'Only JPG, PNG, GIF, WEBP or PDF files are accepted.';
         return null;
     }
-    if (!is_dir(PAYMENT_UPLOAD_DIR)) {
-        @mkdir(PAYMENT_UPLOAD_DIR, 0755, true);
-    }
-    if (!is_dir(PAYMENT_UPLOAD_DIR) || !is_writable(PAYMENT_UPLOAD_DIR)) {
-        $error = 'The upload folder is not writable. Please contact the administrator.';
-        return null;
-    }
     $name = 'pay_' . date('Ymd_His') . '_' . bin2hex(random_bytes(6)) . '.' . $allowed[$mime];
-    $dest = PAYMENT_UPLOAD_DIR . DIRECTORY_SEPARATOR . $name;
-    if (!move_uploaded_file($file['tmp_name'], $dest)) {
-        $error = 'Could not save the uploaded file.';
+    $stored = storage_put($file['tmp_name'], 'payments', $name, $mime);
+    if ($stored === null) {
+        $error = 'Could not save the uploaded file. Please contact the administrator.';
         return null;
     }
-    return PAYMENT_UPLOAD_URL . '/' . $name;
+    return $stored;
 }
 
 /**

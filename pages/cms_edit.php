@@ -91,12 +91,12 @@ function logPageAction(PDO $pdo, int $pageId, string $action, ?int $userId, stri
 
 function handleFileUpload(array $file, string $uploadDir, string $prefix, array $allowed): ?string
 {
-    if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
     $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
     if (!in_array($ext, $allowed, true)) return null;
     $fname = $prefix . '_' . time() . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
-    $dest = $uploadDir . $fname;
-    return move_uploaded_file($file['tmp_name'], $dest) ? ('uploads/info/' . $fname) : null;
+    // $uploadDir is retained for signature compatibility; storage_put resolves
+    // the destination (local uploads/info/ or the Supabase bucket).
+    return storage_put($file['tmp_name'], 'info', $fname);
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
