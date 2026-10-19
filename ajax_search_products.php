@@ -29,13 +29,12 @@ if (function_exists('mb_substr')) {
     $q = substr($q, 0, 60);
 }
 
-if ($q === '') {
-    echo json_encode(['results' => []]);
-    exit;
-}
-
-// Escape LIKE wildcards so user input is matched literally.
-$like = '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $q) . '%';
+// An empty query returns the first page of in-stock products so the picker is
+// usable before the customer types (and when they clear the search).
+$hasQuery = ($q !== '');
+$like = $hasQuery
+    ? '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $q) . '%'
+    : '';
 
 try {
     $pdo = getPDO();
@@ -46,14 +45,16 @@ try {
                                        WHERE b2.product_id = p.id AND b2.quantity > 0 AND b2.status = 'active'), 0)
                         ELSE p.stock_quantity END AS available_stock
             FROM products p
-            WHERE p.product_status = 'active'
-              AND (p.name LIKE :q1 OR p.brand LIKE :q2 OR p.generic_name LIKE :q3
-                   OR p.strength LIKE :q4 OR p.barcode LIKE :q5)
-            HAVING available_stock > 0
-            ORDER BY p.name
-            LIMIT 25";
+            WHERE p.product_status = 'active'";
+    $params = [];
+    if ($hasQuery) {
+        $sql .= " AND (p.name LIKE :q1 OR p.brand LIKE :q2 OR p.generic_name LIKE :q3
+                        OR p.strength LIKE :q4 OR p.barcode LIKE :q5)";
+        $params = ['q1' => $like, 'q2' => $like, 'q3' => $like, 'q4' => $like, 'q5' => $like];
+    }
+    $sql .= " HAVING available_stock > 0 ORDER BY p.name LIMIT 25";
     $stmt = $pdo->prepare($sql);
-    $stmt->execute(['q1' => $like, 'q2' => $like, 'q3' => $like, 'q4' => $like, 'q5' => $like]);
+    $stmt->execute($params);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     $results = array_map(static function (array $r): array {

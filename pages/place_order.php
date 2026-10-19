@@ -219,6 +219,19 @@ if ($editOrder) {
     $selFulfillment = $_POST['fulfillment_method'] === 'pickup' ? 'pickup' : 'delivery';
 }
 
+// A small, bounded initial list keeps the picker usable before the customer
+// types anything. The old page rendered the ENTIRE catalog into every row;
+// this caps it at 25 and live search refines it.
+$initialProducts = $pdo->query("SELECT p.id, p.name, p.brand, p.generic_name, p.dosage_form, p.strength, p.price, p.wholesale_price, p.stock_quantity, p.barcode,
+                                       CASE WHEN EXISTS (SELECT 1 FROM product_batches b WHERE b.product_id = p.id)
+                                            THEN COALESCE((SELECT SUM(b2.quantity) FROM product_batches b2 WHERE b2.product_id = p.id AND b2.quantity > 0 AND b2.status = 'active'), 0)
+                                            ELSE p.stock_quantity END AS available_stock
+                                FROM products p
+                                WHERE p.product_status = 'active'
+                                HAVING available_stock > 0
+                                ORDER BY p.name
+                                LIMIT 25")->fetchAll();
+
 // Seed rows for a prefill / edit with just their own product. Everything else
 // is fetched live as the customer types in the Step 1 search box.
 $seedIds = [];
@@ -263,13 +276,22 @@ $productOptionHtml = function (array $p, bool $selected = false): string {
 };
 
 // Row renderer shared by the edit list and the blank first row.
-$renderRow = function (int $idx, ?array $selectedProduct = null, int $qty = 1, float $disc = 0) use ($productOptionHtml) {
+$renderRow = function (int $idx, ?array $selectedProduct = null, int $qty = 1, float $disc = 0) use ($initialProducts, $productOptionHtml) {
+    $selectedId = $selectedProduct ? (int) $selectedProduct['id'] : 0;
+    $initialIds = array_map('intval', array_column($initialProducts, 'id'));
+    $rowOptions = '';
+    if ($selectedProduct && !in_array($selectedId, $initialIds, true)) {
+        $rowOptions .= $productOptionHtml($selectedProduct, true);
+    }
+    foreach ($initialProducts as $ip) {
+        $rowOptions .= $productOptionHtml($ip, (int) $ip['id'] === $selectedId);
+    }
     ob_start(); ?>
     <div class="ord-item" data-index="<?= $idx ?>">
         <div class="ord-item-head">
             <select name="request_items[<?= $idx ?>][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)">
                 <option value="">Select product</option>
-                <?= $selectedProduct ? $productOptionHtml($selectedProduct, true) : '' ?>
+                <?= $rowOptions ?>
             </select>
             <button type="button" class="ord-item-remove" onclick="removeItem(this)" title="Remove product"><i class="fas fa-trash-alt"></i></button>
         </div>
@@ -482,7 +504,7 @@ $renderRow = function (int $idx, ?array $selectedProduct = null, int $qty = 1, f
                     <div class="ord-field" style="position:relative">
                         <input type="text" id="productSearch" class="ord-input" placeholder="Search products by name, brand, generic, strength or barcode..." oninput="onProductSearch(this.value)" autocomplete="off" style="padding-left:34px">
                         <i class="fas fa-search" style="position:absolute;left:12px;top:38px;color:var(--neutral-400,#94a3b8);font-size:.85rem;pointer-events:none"></i>
-                        <span id="productSearchHint" style="display:block;margin-top:6px;font-size:.74rem;color:var(--neutral-500,#64748b)"><i class="fas fa-lightbulb"></i> Type at least 2 characters — matching products load with live available stock.</span>
+                        <span id="productSearchHint" style="display:block;margin-top:6px;font-size:.74rem;color:var(--neutral-500,#64748b)"><i class="fas fa-lightbulb"></i> Pick from the list, or type 2+ characters to narrow it by name, brand, generic, strength or barcode.</span>
                     </div>
                     <div id="orderItems">
                         <?php if ($editOrder && !empty($editOrderItems)): ?>
@@ -794,6 +816,9 @@ function onProductSearch(value){
     var hint = document.getElementById('productSearchHint');
     if (q.length < 2) {
         if (hint) hint.style.display = '';
+        if (q === '') {
+            PRODUCT_SEARCH_TIMER = setTimeout(function(){ searchProducts(''); }, 150);
+        }
         return;
     }
     if (hint) hint.style.display = 'none';
@@ -910,8 +935,9 @@ function addItem(){
     var firstSel = document.querySelector('.product-select');
     if (!container || !firstSel) return;
     var idx = itemIndex++;
+    var optionsHtml = firstSel.innerHTML.replace(/ selected(="[^"]*")?/g, '');
     var html = '<div class="ord-item" data-index="' + idx + '">';
-    html += '<div class="ord-item-head"><select name="request_items[' + idx + '][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)"><option value="">Select product</option></select>';
+    html += '<div class="ord-item-head"><select name="request_items[' + idx + '][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)">' + optionsHtml + '</select>';
     html += '<button type="button" class="ord-item-remove" onclick="removeItem(this)" title="Remove product"><i class="fas fa-trash-alt"></i></button></div>';
     html += '<div class="ord-item-grid">';
     html += '<div class="ord-field"><span class="ord-label">Quantity</span><input type="number" name="request_items[' + idx + '][quantity]" value="1" min="1" class="ord-input qty-input" onchange="updatePrice(this.closest(\'.ord-item\'))" onkeyup="updatePrice(this.closest(\'.ord-item\'))" required><div class="stock-hint"></div></div>';
