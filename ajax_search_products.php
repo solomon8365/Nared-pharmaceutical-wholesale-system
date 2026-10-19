@@ -1,0 +1,78 @@
+<?php
+/**
+ * Read-only product search for the Place Order page (Step 1).
+ *
+ * Returns a small, ranked list of IN-STOCK active products whose
+ * name / brand / generic / strength / barcode match ?q=.
+ *
+ * "Available stock" is computed the same way the fulfillment FEFO deduction
+ * works: from ACTIVE batches when the product is batch-tracked, otherwise from
+ * products.stock_quantity. Products with no sellable stock are excluded so the
+ * customer never selects something that cannot be ordered.
+ *
+ * This endpoint never writes. It exists so pages/place_order.php no longer has
+ * to render the entire catalog into every row's <select>.
+ */
+require_once __DIR__ . '/auth.php';
+requireLogin();
+
+header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store');
+header('X-Content-Type-Options: nosniff');
+
+$q = trim((string) ($_GET['q'] ?? ''));
+if (function_exists('mb_substr')) {
+    if (mb_strlen($q) > 60) {
+        $q = mb_substr($q, 0, 60);
+    }
+} elseif (strlen($q) > 60) {
+    $q = substr($q, 0, 60);
+}
+
+if ($q === '') {
+    echo json_encode(['results' => []]);
+    exit;
+}
+
+// Escape LIKE wildcards so user input is matched literally.
+$like = '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $q) . '%';
+
+try {
+    $pdo = getPDO();
+    $sql = "SELECT p.id, p.name, p.brand, p.generic_name, p.dosage_form, p.strength,
+                   p.price, p.wholesale_price, p.barcode,
+                   CASE WHEN EXISTS (SELECT 1 FROM product_batches b WHERE b.product_id = p.id)
+                        THEN COALESCE((SELECT SUM(b2.quantity) FROM product_batches b2
+                                       WHERE b2.product_id = p.id AND b2.quantity > 0 AND b2.status = 'active'), 0)
+                        ELSE p.stock_quantity END AS available_stock
+            FROM products p
+            WHERE p.product_status = 'active'
+              AND (p.name LIKE :q1 OR p.brand LIKE :q2 OR p.generic_name LIKE :q3
+                   OR p.strength LIKE :q4 OR p.barcode LIKE :q5)
+            HAVING available_stock > 0
+            ORDER BY p.name
+            LIMIT 25";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute(['q1' => $like, 'q2' => $like, 'q3' => $like, 'q4' => $like, 'q5' => $like]);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $results = array_map(static function (array $r): array {
+        return [
+            'id' => (int) $r['id'],
+            'name' => (string) $r['name'],
+            'brand' => (string) ($r['brand'] ?? ''),
+            'generic' => (string) ($r['generic_name'] ?? ''),
+            'form' => (string) ($r['dosage_form'] ?? ''),
+            'strength' => (string) ($r['strength'] ?? ''),
+            'barcode' => (string) ($r['barcode'] ?? ''),
+            'price' => (float) $r['price'],
+            'wholesale_price' => (float) ($r['wholesale_price'] ?? 0),
+            'stock' => (int) $r['available_stock'],
+        ];
+    }, $rows);
+
+    echo json_encode(['results' => $results]);
+} catch (Throwable $e) {
+    http_response_code(500);
+    echo json_encode(['results' => [], 'error' => 'search_failed']);
+}

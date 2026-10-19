@@ -40,17 +40,19 @@ if ($customer) {
     $customerTypeLabel = $typeLabels[$customer['customer_type'] ?? ''] ?? '';
 }
 
-$products = $pdo->query("SELECT id, name, brand, generic_name, dosage_form, strength, price, wholesale_price, stock_quantity, barcode FROM products WHERE product_status = 'active' AND (id IN (SELECT product_id FROM product_batches WHERE quantity > 0 AND status = 'active') OR (stock_quantity > 0 AND id NOT IN (SELECT product_id FROM product_batches WHERE quantity > 0))) ORDER BY name")->fetchAll();
+// Step 1 no longer renders the whole catalog into every <select>; it searches
+// products live through ajax_search_products.php. Here we only need to know
+// whether any sellable product exists, and to seed the rows already referenced
+// by a prefill / edit (loaded further below).
+$hasProducts = (int) $pdo->query("SELECT COUNT(*) FROM products p WHERE p.product_status = 'active' AND (EXISTS (SELECT 1 FROM product_batches b WHERE b.product_id = p.id AND b.quantity > 0 AND b.status = 'active') OR p.stock_quantity > 0)")->fetchColumn() > 0;
 $vatRate = CalculationService::vatRate($pdo);
 
 $prefillPid = isset($_GET['product_id']) ? (int) $_GET['product_id'] : 0;
-$validPre = false;
 if ($prefillPid > 0) {
-    foreach ($products as $p) {
-        if ((int) $p['id'] === $prefillPid) { $validPre = true; break; }
-    }
+    $ps = $pdo->prepare("SELECT COUNT(*) FROM products WHERE id = :id AND product_status = 'active'");
+    $ps->execute(['id' => $prefillPid]);
+    if (!(int) $ps->fetchColumn()) $prefillPid = 0;
 }
-if (!$validPre) $prefillPid = 0;
 
 $editOrderId = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
 $editOrder = null;
@@ -217,26 +219,57 @@ if ($editOrder) {
     $selFulfillment = $_POST['fulfillment_method'] === 'pickup' ? 'pickup' : 'delivery';
 }
 
+// Seed rows for a prefill / edit with just their own product. Everything else
+// is fetched live as the customer types in the Step 1 search box.
+$seedIds = [];
+if ($prefillPid > 0 && !$editOrder) { $seedIds[$prefillPid] = true; }
+foreach ($editOrderItems as $it) {
+    $pid = (int) ($it['product_id'] ?? 0);
+    if ($pid > 0) { $seedIds[$pid] = true; }
+}
+$seedProducts = [];
+if (!empty($seedIds)) {
+    $seedIn = implode(',', array_map('intval', array_keys($seedIds)));
+    $seedStmt = $pdo->query("SELECT p.id, p.name, p.brand, p.generic_name, p.dosage_form, p.strength, p.price, p.wholesale_price, p.stock_quantity, p.barcode,
+                                    CASE WHEN EXISTS (SELECT 1 FROM product_batches b WHERE b.product_id = p.id)
+                                         THEN COALESCE((SELECT SUM(b2.quantity) FROM product_batches b2 WHERE b2.product_id = p.id AND b2.quantity > 0 AND b2.status = 'active'), 0)
+                                         ELSE p.stock_quantity END AS available_stock
+                             FROM products p WHERE p.id IN ($seedIn)");
+    foreach ($seedStmt->fetchAll() as $row) { $seedProducts[(int) $row['id']] = $row; }
+}
+
+// Renders one <option> for a product using the SAME data attributes the live
+// search endpoint feeds into the page, so totals/stock behave identically.
+$productOptionHtml = function (array $p): string {
+    $name = (string) $p['name'];
+    $brand = (string) ($p['brand'] ?? '');
+    $strength = (string) ($p['strength'] ?? '');
+    $label = $name
+        . ($brand !== '' ? ' (' . $brand . ')' : '')
+        . ($strength !== '' ? ' - ' . $strength : '')
+        . ' — ' . fmt((float) $p['price']);
+    $search = strtolower($name . ' ' . $brand . ' ' . (string) ($p['generic_name'] ?? '') . ' ' . $strength . ' ' . (string) ($p['barcode'] ?? ''));
+    return '<option value="' . (int) $p['id'] . '"'
+        . ' data-price="' . (float) $p['price'] . '"'
+        . ' data-wprice="' . (float) ($p['wholesale_price'] ?? 0) . '"'
+        . ' data-stock="' . (int) ($p['available_stock'] ?? ($p['stock_quantity'] ?? 0)) . '"'
+        . ' data-name="' . htmlspecialchars($name, ENT_QUOTES) . '"'
+        . ' data-brand="' . htmlspecialchars($brand, ENT_QUOTES) . '"'
+        . ' data-strength="' . htmlspecialchars($strength, ENT_QUOTES) . '"'
+        . ' data-generic="' . htmlspecialchars((string) ($p['generic_name'] ?? ''), ENT_QUOTES) . '"'
+        . ' data-form="' . htmlspecialchars((string) ($p['dosage_form'] ?? ''), ENT_QUOTES) . '"'
+        . ' data-search="' . htmlspecialchars($search, ENT_QUOTES) . '"'
+        . '>' . htmlspecialchars($label) . '</option>';
+};
+
 // Row renderer shared by the edit list and the blank first row.
-$renderRow = function (int $idx, int $selectedId = 0, int $qty = 1, float $disc = 0) use ($products) {
+$renderRow = function (int $idx, ?array $selectedProduct = null, int $qty = 1, float $disc = 0) use ($productOptionHtml) {
     ob_start(); ?>
     <div class="ord-item" data-index="<?= $idx ?>">
         <div class="ord-item-head">
             <select name="request_items[<?= $idx ?>][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)">
                 <option value="">Select product</option>
-                <?php foreach ($products as $product): ?>
-                    <option value="<?= htmlspecialchars((string) $product['id']) ?>"
-                        data-price="<?= (float) $product['price'] ?>"
-                        data-wprice="<?= (float) $product['wholesale_price'] ?>"
-                        data-stock="<?= (int) $product['stock_quantity'] ?>"
-                        data-name="<?= htmlspecialchars($product['name']) ?>"
-                        data-brand="<?= htmlspecialchars($product['brand'] ?? '') ?>"
-                        data-strength="<?= htmlspecialchars($product['strength'] ?? '') ?>"
-                        data-generic="<?= htmlspecialchars($product['generic_name'] ?? '') ?>"
-                        data-form="<?= htmlspecialchars($product['dosage_form'] ?? '') ?>"
-                        data-search="<?= strtolower(htmlspecialchars($product['name'] . ' ' . ($product['brand'] ?? '') . ' ' . ($product['generic_name'] ?? '') . ' ' . ($product['strength'] ?? ''))) ?>"
-                        <?= (int) $product['id'] === $selectedId ? ' selected' : '' ?>><?= htmlspecialchars($product['name']) ?><?= !empty($product['brand']) ? ' (' . htmlspecialchars($product['brand']) . ')' : '' ?><?= !empty($product['strength']) ? ' - ' . htmlspecialchars($product['strength']) : '' ?> — <?= fmt((float) $product['price']) ?></option>
-                <?php endforeach; ?>
+                <?= $selectedProduct ? $productOptionHtml($selectedProduct) : '' ?>
             </select>
             <button type="button" class="ord-item-remove" onclick="removeItem(this)" title="Remove product"><i class="fas fa-trash-alt"></i></button>
         </div>
@@ -423,7 +456,7 @@ $renderRow = function (int $idx, int $selectedId = 0, int $qty = 1, float $disc 
 
     <?php if ($cid === null): ?>
         <div class="ord-panel"><p>Your account is not linked to a customer profile. Contact an administrator.</p></div>
-    <?php elseif (empty($products)): ?>
+    <?php elseif (!$hasProducts): ?>
         <div class="ord-panel"><p>No products are available yet. Please check back later.</p></div>
     <?php else: ?>
     <form method="post" enctype="multipart/form-data" id="orderForm" data-swal-exclude="true" data-ajax-off="true" novalidate>
@@ -447,16 +480,17 @@ $renderRow = function (int $idx, int $selectedId = 0, int $qty = 1, float $disc 
                 <div class="ord-panel ord-pane" data-step="1">
                     <h2><i class="fas fa-box-open"></i> Step 1 · Review Order</h2>
                     <div class="ord-field" style="position:relative">
-                        <input type="text" id="productSearch" class="ord-input" placeholder="Search products by name, brand, generic or strength..." oninput="filterProductSelects(this.value)" style="padding-left:34px">
+                        <input type="text" id="productSearch" class="ord-input" placeholder="Search products by name, brand, generic, strength or barcode..." oninput="onProductSearch(this.value)" autocomplete="off" style="padding-left:34px">
                         <i class="fas fa-search" style="position:absolute;left:12px;top:38px;color:var(--neutral-400,#94a3b8);font-size:.85rem;pointer-events:none"></i>
+                        <span id="productSearchHint" style="display:block;margin-top:6px;font-size:.74rem;color:var(--neutral-500,#64748b)"><i class="fas fa-lightbulb"></i> Type at least 2 characters — matching products load with live available stock.</span>
                     </div>
                     <div id="orderItems">
                         <?php if ($editOrder && !empty($editOrderItems)): ?>
                             <?php foreach ($editOrderItems as $i => $item): ?>
-                                <?= $renderRow((int) $i, (int) $item['product_id'], (int) $item['quantity'], (float) ($item['discount'] ?? 0)) ?>
+                                <?= $renderRow((int) $i, $seedProducts[(int) $item['product_id']] ?? null, (int) $item['quantity'], (float) ($item['discount'] ?? 0)) ?>
                             <?php endforeach; ?>
                         <?php else: ?>
-                            <?= $renderRow(0, $prefillPid, 1, 0) ?>
+                            <?= $renderRow(0, $prefillPid > 0 ? ($seedProducts[$prefillPid] ?? null) : null, 1, 0) ?>
                         <?php endif; ?>
                     </div>
                     <button type="button" class="ord-add-btn" onclick="addItem()"><i class="fas fa-plus"></i> Add Another Product</button>
@@ -730,21 +764,71 @@ function switchPaymentMethod(){
     recalcSummary();
 }
 
-function filterProductSelects(query){
-    var q = (query || '').toLowerCase().trim();
+var PRODUCT_SEARCH_TIMER = null;
+var PRODUCT_LAST_QUERY = '';
+
+function escAttr(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function productOptionHtml(p){
+    var name = p.name || '';
+    var brand = p.brand || '';
+    var strength = p.strength || '';
+    var label = name + (brand ? ' (' + brand + ')' : '') + (strength ? ' - ' + strength : '') + ' — ' + money(parseFloat(p.price || 0));
+    var search = (name + ' ' + brand + ' ' + (p.generic || '') + ' ' + strength + ' ' + (p.barcode || '')).toLowerCase();
+    return '<option value="' + parseInt(p.id, 10) + '"'
+        + ' data-price="' + parseFloat(p.price || 0) + '"'
+        + ' data-wprice="' + parseFloat(p.wholesale_price || 0) + '"'
+        + ' data-stock="' + parseInt(p.stock || 0, 10) + '"'
+        + ' data-name="' + escAttr(name) + '"'
+        + ' data-brand="' + escAttr(brand) + '"'
+        + ' data-strength="' + escAttr(strength) + '"'
+        + ' data-generic="' + escAttr(p.generic || '') + '"'
+        + ' data-form="' + escAttr(p.form || '') + '"'
+        + ' data-search="' + escAttr(search) + '"'
+        + '>' + escAttr(label) + '</option>';
+}
+
+function onProductSearch(value){
+    if (PRODUCT_SEARCH_TIMER) clearTimeout(PRODUCT_SEARCH_TIMER);
+    var q = (value || '').trim();
+    var hint = document.getElementById('productSearchHint');
+    if (q.length < 2) {
+        if (hint) hint.style.display = '';
+        return;
+    }
+    if (hint) hint.style.display = 'none';
+    PRODUCT_SEARCH_TIMER = setTimeout(function(){ searchProducts(q); }, 250);
+}
+
+function searchProducts(q){
+    PRODUCT_LAST_QUERY = q;
+    fetch('ajax_search_products.php?q=' + encodeURIComponent(q), {
+        headers: {'X-Requested-With': 'XMLHttpRequest'},
+        credentials: 'same-origin'
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(data){ applyProductOptions((data && data.results) || []); })
+    .catch(function(){ /* keep whatever options are already present */ });
+}
+
+function applyProductOptions(results){
+    var optionsHtml = results.map(productOptionHtml).join('');
     document.querySelectorAll('.product-select').forEach(function(sel){
-        Array.from(sel.options).forEach(function(opt){
-            if (!opt.value) return;
-            var text = (opt.getAttribute('data-search') || opt.textContent).toLowerCase();
-            opt.hidden = q !== '' && text.indexOf(q) === -1;
-            opt.disabled = opt.hidden;
-        });
-        if (q !== '' && sel.value && sel.options[sel.selectedIndex].hidden) {
-            sel.value = '';
-            updatePrice(sel.closest('.ord-item'));
+        var current = sel.value;
+        var savedHtml = '';
+        if (current && sel.selectedIndex >= 0 && sel.options[sel.selectedIndex]) {
+            savedHtml = sel.options[sel.selectedIndex].outerHTML;
         }
+        sel.innerHTML = '<option value="">Select product</option>' + optionsHtml;
+        if (current && !sel.querySelector('option[value="' + current + '"]')) {
+            sel.insertAdjacentHTML('beforeend', savedHtml);
+        }
+        sel.value = current || '';
     });
 }
+
+// Backwards-compatible alias for any older inline handler.
+function filterProductSelects(query){ onProductSearch(query); }
 
 function updatePrice(row){
     if (!row) return;
@@ -826,9 +910,10 @@ function addItem(){
     var firstSel = document.querySelector('.product-select');
     if (!container || !firstSel) return;
     var idx = itemIndex++;
-    var optionsHtml = firstSel.innerHTML.replace(/ selected(="[^"]*")?/g, '');
+    var firstValue = firstSel.value;
+    var firstOptionHtml = (firstValue && firstSel.selectedIndex >= 0 && firstSel.options[firstSel.selectedIndex]) ? firstSel.options[firstSel.selectedIndex].outerHTML : '';
     var html = '<div class="ord-item" data-index="' + idx + '">';
-    html += '<div class="ord-item-head"><select name="request_items[' + idx + '][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)">' + optionsHtml + '</select>';
+    html += '<div class="ord-item-head"><select name="request_items[' + idx + '][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)"><option value="">Select product</option>' + firstOptionHtml + '</select>';
     html += '<button type="button" class="ord-item-remove" onclick="removeItem(this)" title="Remove product"><i class="fas fa-trash-alt"></i></button></div>';
     html += '<div class="ord-item-grid">';
     html += '<div class="ord-field"><span class="ord-label">Quantity</span><input type="number" name="request_items[' + idx + '][quantity]" value="1" min="1" class="ord-input qty-input" onchange="updatePrice(this.closest(\'.ord-item\'))" onkeyup="updatePrice(this.closest(\'.ord-item\'))" required><div class="stock-hint"></div></div>';
@@ -837,8 +922,9 @@ function addItem(){
     html += '<div class="ord-field"><span class="ord-label">Line Total</span><div class="ord-static ord-line-total" data-line-total>—</div></div>';
     html += '</div></div>';
     container.insertAdjacentHTML('beforeend', html);
-    var searchVal = document.getElementById('productSearch') ? document.getElementById('productSearch').value : '';
-    if (searchVal) filterProductSelects(searchVal);
+    // Re-apply the current search so the new row gets the same live results.
+    var searchEl = document.getElementById('productSearch');
+    if (searchEl && searchEl.value.trim().length >= 2) searchProducts(searchEl.value.trim());
     recalcSummary();
 }
 
