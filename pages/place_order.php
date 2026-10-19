@@ -368,6 +368,20 @@ $renderRow = function (int $idx, ?array $selectedProduct = null, int $qty = 1, f
 .ord-add-btn:hover{background:var(--primary-100,#dbeafe)}
 .stock-hint{margin-top:5px;font-size:.74rem;font-weight:700}
 .ord-in{color:#15803d}.ord-out{color:#dc2626}
+/* Product suggestion panel under the Step 1 search box */
+.ord-suggest{position:absolute;left:0;right:0;top:46px;z-index:60;background:#fff;border:1px solid var(--neutral-200,#e2e8f0);border-radius:12px;box-shadow:0 16px 40px rgba(15,23,42,.16);max-height:340px;overflow:auto;display:none}
+.ord-suggest.is-open{display:block}
+.ord-suggest-head{padding:8px 12px;font-size:.68rem;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#64748b;background:#f8fafc;border-bottom:1px solid #eef2f6;position:sticky;top:0;z-index:1}
+.ord-suggest-item{display:flex;align-items:center;gap:12px;width:100%;padding:10px 12px;border:0;border-bottom:1px solid #f1f5f9;background:#fff;text-align:left;cursor:pointer;font:inherit}
+.ord-suggest-item:last-child{border-bottom:0}
+.ord-suggest-item:hover,.ord-suggest-item:focus{background:#eff6ff;outline:none}
+.ord-suggest-main{flex:1;min-width:0}
+.ord-suggest-name{display:block;font-weight:700;font-size:.86rem;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ord-suggest-meta{display:block;font-size:.72rem;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ord-suggest-price{display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-weight:800;font-size:.82rem;color:#1e40af;white-space:nowrap}
+.ord-suggest-stock{font-size:.66rem;font-weight:700}
+.ord-suggest-empty{padding:16px 14px;font-size:.82rem;line-height:1.45;color:#64748b;text-align:center}
+.ord-suggest-empty strong{color:#b45309}
 
 /* Business info card */
 .ord-info-card{background:var(--primary-50,#eff6ff);border:1px solid var(--primary-200,#bfdbfe);border-radius:12px;padding:16px;margin-bottom:16px}
@@ -505,6 +519,7 @@ $renderRow = function (int $idx, ?array $selectedProduct = null, int $qty = 1, f
                         <input type="text" id="productSearch" class="ord-input" placeholder="Search products by name, brand, generic, strength or barcode..." oninput="onProductSearch(this.value)" autocomplete="off" style="padding-left:34px">
                         <i class="fas fa-search" style="position:absolute;left:12px;top:38px;color:var(--neutral-400,#94a3b8);font-size:.85rem;pointer-events:none"></i>
                         <span id="productSearchHint" style="display:block;margin-top:6px;font-size:.74rem;color:var(--neutral-500,#64748b)"><i class="fas fa-lightbulb"></i> Pick from the list, or type 2+ characters to narrow it by name, brand, generic, strength or barcode.</span>
+                        <div id="productSuggestions" class="ord-suggest" role="listbox" aria-label="Product suggestions"></div>
                     </div>
                     <div id="orderItems">
                         <?php if ($editOrder && !empty($editOrderItems)): ?>
@@ -788,6 +803,8 @@ function switchPaymentMethod(){
 
 var PRODUCT_SEARCH_TIMER = null;
 var PRODUCT_LAST_QUERY = '';
+var PRODUCT_LAST_RESULTS = [];
+var PRODUCT_SEARCH_SEQ = 0;
 
 function escAttr(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -810,6 +827,53 @@ function productOptionHtml(p){
         + '>' + escAttr(label) + '</option>';
 }
 
+function stockBadge(stock){
+    var n = parseInt(stock || 0, 10);
+    if (n <= 0) return '<span class="ord-suggest-stock ord-out"><i class="fas fa-circle-xmark"></i> Out of stock</span>';
+    if (n <= 10) return '<span class="ord-suggest-stock" style="color:#b45309"><i class="fas fa-triangle-exclamation"></i> Low stock · ' + n + '</span>';
+    return '<span class="ord-suggest-stock ord-in"><i class="fas fa-circle-check"></i> In stock · ' + n + '</span>';
+}
+
+function suggestionItemHtml(p){
+    var name = p.name || '';
+    var bits = [];
+    if (p.brand) bits.push(p.brand);
+    if (p.generic && p.generic !== name) bits.push(p.generic);
+    if (p.strength) bits.push(p.strength);
+    if (p.form) bits.push(p.form);
+    return '<button type="button" class="ord-suggest-item" role="option" data-pid="' + parseInt(p.id, 10) + '">'
+        + '<span class="ord-suggest-main"><span class="ord-suggest-name">' + escAttr(name) + '</span>'
+        + '<span class="ord-suggest-meta">' + escAttr(bits.join(' · ')) + '</span></span>'
+        + '<span class="ord-suggest-price">' + money(parseFloat(p.price || 0)) + stockBadge(p.stock) + '</span>'
+        + '</button>';
+}
+
+function showSuggestionsBox(html){
+    var box = document.getElementById('productSuggestions');
+    if (!box) return;
+    box.innerHTML = html;
+    box.classList.add('is-open');
+}
+
+function closeSuggestions(){
+    var box = document.getElementById('productSuggestions');
+    if (box) box.classList.remove('is-open');
+}
+
+function renderSuggestions(results, q, matchedBy){
+    if (!results.length) {
+        showSuggestionsBox('<div class="ord-suggest-empty"><strong>No products match “' + escAttr(q) + '”.</strong><br>Check the spelling, try a generic name, or clear the box to browse all products.</div>');
+        return;
+    }
+    var head;
+    if (q) {
+        head = (matchedBy === 'similar' ? 'Close matches' : results.length + ' match' + (results.length === 1 ? '' : 'es')) + ' for “' + escAttr(q) + '”';
+    } else {
+        head = results.length + ' product' + (results.length === 1 ? '' : 's') + ' available — click one to add it';
+    }
+    showSuggestionsBox('<div class="ord-suggest-head">' + head + '</div>' + results.map(suggestionItemHtml).join(''));
+}
+
 function onProductSearch(value){
     if (PRODUCT_SEARCH_TIMER) clearTimeout(PRODUCT_SEARCH_TIMER);
     var q = (value || '').trim();
@@ -818,22 +882,35 @@ function onProductSearch(value){
         if (hint) hint.style.display = '';
         if (q === '') {
             PRODUCT_SEARCH_TIMER = setTimeout(function(){ searchProducts(''); }, 150);
+        } else if (PRODUCT_LAST_RESULTS.length) {
+            renderSuggestions(PRODUCT_LAST_RESULTS, '', 'exact');
         }
         return;
     }
     if (hint) hint.style.display = 'none';
-    PRODUCT_SEARCH_TIMER = setTimeout(function(){ searchProducts(q); }, 250);
+    PRODUCT_SEARCH_TIMER = setTimeout(function(){ searchProducts(q); }, 220);
 }
 
 function searchProducts(q){
     PRODUCT_LAST_QUERY = q;
+    var seq = ++PRODUCT_SEARCH_SEQ;
+    showSuggestionsBox('<div class="ord-suggest-empty"><i class="fas fa-spinner fa-spin"></i> Searching…</div>');
     fetch('ajax_search_products.php?q=' + encodeURIComponent(q), {
         headers: {'X-Requested-With': 'XMLHttpRequest'},
         credentials: 'same-origin'
     })
     .then(function(r){ return r.json(); })
-    .then(function(data){ applyProductOptions((data && data.results) || []); })
-    .catch(function(){ /* keep whatever options are already present */ });
+    .then(function(data){
+        if (seq !== PRODUCT_SEARCH_SEQ) return; // a newer search already started
+        var results = (data && data.results) || [];
+        PRODUCT_LAST_RESULTS = results;
+        applyProductOptions(results);
+        renderSuggestions(results, q, data && data.matched_by);
+    })
+    .catch(function(){
+        if (seq !== PRODUCT_SEARCH_SEQ) return;
+        showSuggestionsBox('<div class="ord-suggest-empty"><strong>Search is unavailable right now.</strong><br>You can still pick a product from the dropdown.</div>');
+    });
 }
 
 function applyProductOptions(results){
@@ -851,6 +928,50 @@ function applyProductOptions(results){
         sel.value = current || '';
     });
 }
+
+function chooseSuggestion(pid){
+    var product = null;
+    for (var i = 0; i < PRODUCT_LAST_RESULTS.length; i++) {
+        if (String(PRODUCT_LAST_RESULTS[i].id) === String(pid)) { product = PRODUCT_LAST_RESULTS[i]; break; }
+    }
+    if (!product) return;
+    // Type-to-add fills the first row with no product yet (or creates a row).
+    var sel = null;
+    var selects = document.querySelectorAll('.product-select');
+    for (var j = 0; j < selects.length; j++) { if (!selects[j].value) { sel = selects[j]; break; } }
+    if (!sel) { addItem(); var all = document.querySelectorAll('.product-select'); sel = all[all.length - 1]; }
+    if (!sel) return;
+    var value = String(parseInt(product.id, 10));
+    if (!sel.querySelector('option[value="' + value + '"]')) {
+        sel.insertAdjacentHTML('beforeend', productOptionHtml(product));
+    }
+    sel.value = value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    var row = sel.closest('.ord-item');
+    if (row) updatePrice(row);
+    closeSuggestions();
+    var input = document.getElementById('productSearch');
+    if (input) input.value = '';
+    var hint = document.getElementById('productSearchHint');
+    if (hint) hint.style.display = '';
+    var qty = row ? row.querySelector('.qty-input') : null;
+    if (qty) { try { qty.focus(); qty.select(); } catch (e) {} }
+}
+
+// Clicking a suggestion fills the first empty row; clicking elsewhere closes it.
+document.addEventListener('click', function(e){
+    var item = e.target && e.target.closest ? e.target.closest('.ord-suggest-item') : null;
+    if (item) {
+        e.preventDefault();
+        chooseSuggestion(item.getAttribute('data-pid'));
+        return;
+    }
+    var box = document.getElementById('productSuggestions');
+    var input = document.getElementById('productSearch');
+    if (box && box.classList.contains('is-open') && !box.contains(e.target) && e.target !== input) {
+        closeSuggestions();
+    }
+});
 
 // Backwards-compatible alias for any older inline handler.
 function filterProductSelects(query){ onProductSearch(query); }
@@ -946,9 +1067,6 @@ function addItem(){
     html += '<div class="ord-field"><span class="ord-label">Line Total</span><div class="ord-static ord-line-total" data-line-total>—</div></div>';
     html += '</div></div>';
     container.insertAdjacentHTML('beforeend', html);
-    // Re-apply the current search so the new row gets the same live results.
-    var searchEl = document.getElementById('productSearch');
-    if (searchEl && searchEl.value.trim().length >= 2) searchProducts(searchEl.value.trim());
     recalcSummary();
 }
 
@@ -1091,6 +1209,18 @@ document.addEventListener('DOMContentLoaded', function(){
     document.querySelectorAll('.ord-item').forEach(function(row){ updatePrice(row); });
     recalcSummary();
     ordShowStep(CURRENT_STEP);
+
+    // Reopen the suggestion panel when returning to the search box.
+    var searchInput = document.getElementById('productSearch');
+    if (searchInput) {
+        searchInput.addEventListener('focus', function(){
+            var box = document.getElementById('productSuggestions');
+            if (box && box.innerHTML.trim() !== '' && this.value.trim() !== '') box.classList.add('is-open');
+        });
+        searchInput.addEventListener('keydown', function(e){
+            if (e.key === 'Escape') closeSuggestions();
+        });
+    }
 
     <?php if ($duplicateSubmit): ?>
     var dn = document.getElementById('dupNote'); if (dn) dn.style.display = 'block';
