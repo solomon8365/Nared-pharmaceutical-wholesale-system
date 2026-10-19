@@ -240,7 +240,7 @@ if (!empty($seedIds)) {
 
 // Renders one <option> for a product using the SAME data attributes the live
 // search endpoint feeds into the page, so totals/stock behave identically.
-$productOptionHtml = function (array $p): string {
+$productOptionHtml = function (array $p, bool $selected = false): string {
     $name = (string) $p['name'];
     $brand = (string) ($p['brand'] ?? '');
     $strength = (string) ($p['strength'] ?? '');
@@ -249,7 +249,7 @@ $productOptionHtml = function (array $p): string {
         . ($strength !== '' ? ' - ' . $strength : '')
         . ' — ' . fmt((float) $p['price']);
     $search = strtolower($name . ' ' . $brand . ' ' . (string) ($p['generic_name'] ?? '') . ' ' . $strength . ' ' . (string) ($p['barcode'] ?? ''));
-    return '<option value="' . (int) $p['id'] . '"'
+    return '<option value="' . (int) $p['id'] . '"' . ($selected ? ' selected' : '')
         . ' data-price="' . (float) $p['price'] . '"'
         . ' data-wprice="' . (float) ($p['wholesale_price'] ?? 0) . '"'
         . ' data-stock="' . (int) ($p['available_stock'] ?? ($p['stock_quantity'] ?? 0)) . '"'
@@ -269,7 +269,7 @@ $renderRow = function (int $idx, ?array $selectedProduct = null, int $qty = 1, f
         <div class="ord-item-head">
             <select name="request_items[<?= $idx ?>][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)">
                 <option value="">Select product</option>
-                <?= $selectedProduct ? $productOptionHtml($selectedProduct) : '' ?>
+                <?= $selectedProduct ? $productOptionHtml($selectedProduct, true) : '' ?>
             </select>
             <button type="button" class="ord-item-remove" onclick="removeItem(this)" title="Remove product"><i class="fas fa-trash-alt"></i></button>
         </div>
@@ -910,10 +910,8 @@ function addItem(){
     var firstSel = document.querySelector('.product-select');
     if (!container || !firstSel) return;
     var idx = itemIndex++;
-    var firstValue = firstSel.value;
-    var firstOptionHtml = (firstValue && firstSel.selectedIndex >= 0 && firstSel.options[firstSel.selectedIndex]) ? firstSel.options[firstSel.selectedIndex].outerHTML : '';
     var html = '<div class="ord-item" data-index="' + idx + '">';
-    html += '<div class="ord-item-head"><select name="request_items[' + idx + '][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)"><option value="">Select product</option>' + firstOptionHtml + '</select>';
+    html += '<div class="ord-item-head"><select name="request_items[' + idx + '][product_id]" class="ord-sel product-select" required onchange="updatePrice(this)"><option value="">Select product</option></select>';
     html += '<button type="button" class="ord-item-remove" onclick="removeItem(this)" title="Remove product"><i class="fas fa-trash-alt"></i></button></div>';
     html += '<div class="ord-item-grid">';
     html += '<div class="ord-field"><span class="ord-label">Quantity</span><input type="number" name="request_items[' + idx + '][quantity]" value="1" min="1" class="ord-input qty-input" onchange="updatePrice(this.closest(\'.ord-item\'))" onkeyup="updatePrice(this.closest(\'.ord-item\'))" required><div class="stock-hint"></div></div>';
