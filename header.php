@@ -108,7 +108,7 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
     <title><?= htmlspecialchars($pageTitle) ?> — <?= htmlspecialchars(APP_NAME) ?></title>
     <?= favicon_tags() ?>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <link rel="stylesheet" href="assets/css/style.css?v=15">
+    <link rel="stylesheet" href="assets/css/style.css?v=16">
     <link rel="stylesheet" href="assets/css/portal.css?v=1">
     <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
     <script src="assets/vendor/sweetalert2/sweetalert2.all.min.js?v=1"></script>
