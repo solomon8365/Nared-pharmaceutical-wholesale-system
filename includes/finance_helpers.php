@@ -731,7 +731,7 @@ function finCss(): string {
 .fin-pill{padding:6px 14px;border-radius:20px;font-size:.78rem;font-weight:600;border:1px solid var(--fin-border);background:#fff;color:var(--fin-gray);cursor:pointer;transition:all .15s;font-family:inherit}
 .fin-pill:hover{border-color:#94a3b8;color:#334155}
 .fin-pill.active{background:var(--fin-blue);color:#fff;border-color:var(--fin-blue)}
-.fin-modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9998;align-items:center;justify-content:center}
+.fin-modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1050;align-items:center;justify-content:center}
 .fin-modal-overlay.show{display:flex}
 .fin-modal{background:#fff;border-radius:16px;padding:24px;max-width:600px;width:95%;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3)}
 .fin-modal h3{font-size:1.1rem;font-weight:700;margin-bottom:16px;display:flex;align-items:center;gap:8px}

@@ -147,7 +147,7 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
         <button class="sidebar-toggle" id="sidebar-toggle" onclick="collapseSidebar()"><i class="fas fa-bars"></i></button>
     </div>
     <nav class="sidebar-nav">
-        <a href="?page=dashboard" class="sidebar-link<?= $page === 'dashboard' ? ' active' : '' ?>"><i class="fas fa-home"></i><span>Home</span></a>
+        <?php if (!isStoreManager() && !isDeliveryStaff()): ?><a href="?page=dashboard" class="sidebar-link<?= $page === 'dashboard' ? ' active' : '' ?>"><i class="fas fa-home"></i><span>Home</span></a><?php endif; ?>
         <?php if (isSuperAdmin()): ?>
             <div class="sidebar-group<?= in_array($page, ['super_admin_dashboard','users','roles','settings','backup','audit_logs','login_history','departments','tax_currency','system_sync']) ? ' open' : '' ?>">
                 <div class="sidebar-group-header" onclick="toggleGroup('sadm')"><i class="fas fa-shield-halved"></i><span>Super Admin</span><i class="fas fa-chevron-right chevron"></i></div>
@@ -225,16 +225,13 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
                         <a href="?page=delivery_history" class="sidebar-link sub<?= $page === 'delivery_history' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Reports</a>
                     <?php else: ?>
                     <?php if (hasPermission('assign_deliveries', 'view')): ?><a href="?page=delivery_assign" class="sidebar-link sub<?= $page === 'delivery_assign' && ($_GET['tab'] ?? '') !== 'reassign' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Assign Driver</a><?php endif; ?>
-                    <?php if (hasPermission('assign_deliveries', 'view')): ?><a href="?page=delivery_assign&tab=reassign" class="sidebar-link sub<?= $page === 'delivery_assign' && ($_GET['tab'] ?? '') === 'reassign' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Reassign Driver</a><?php endif; ?>
+
                     <?php if (hasPermission('delivery_staff', 'view')): ?><a href="?page=delivery_staff" class="sidebar-link sub<?= $page === 'delivery_staff' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Driver Management</a><?php endif; ?>
                     <div class="sidebar-divider"></div>
-                    <?php if (hasPermission('assign_deliveries', 'view')): ?><a href="?page=delivery_assign" class="sidebar-link sub<?= $page === 'delivery_assign' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Queue</a><?php endif; ?>
-                    <?php if (hasPermission('delivery_tracking', 'view')): ?><a href="?page=delivery_tracking&status=assigned" class="sidebar-link sub<?= $page === 'delivery_tracking' && ($_GET['status'] ?? '') === 'assigned' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Assigned Orders</a><?php endif; ?>
-                    <?php if (hasPermission('delivery_tracking', 'view')): ?><a href="?page=delivery_tracking&status=out_for_delivery" class="sidebar-link sub<?= $page === 'delivery_tracking' && ($_GET['status'] ?? '') === 'out_for_delivery' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Out for Delivery</a><?php endif; ?>
-                    <?php if (hasPermission('delivery_tracking', 'view')): ?><a href="?page=delivery_tracking" class="sidebar-link sub<?= $page === 'delivery_tracking' && ($_GET['status'] ?? '') === '' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Tracking</a><?php endif; ?>
-                    <?php if (hasPermission('delivery_tracking', 'view')): ?><a href="?page=delivery_tracking&status=delivered" class="sidebar-link sub<?= $page === 'delivery_tracking' && ($_GET['status'] ?? '') === 'delivered' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Completed Deliveries</a><?php endif; ?>
-                    <?php if (hasPermission('delivery_tracking', 'view')): ?><a href="?page=delivery_tracking&status=failed" class="sidebar-link sub<?= $page === 'delivery_tracking' && ($_GET['status'] ?? '') === 'failed' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Failed Deliveries</a><?php endif; ?>
+
+                    <?php if (hasPermission('delivery_tracking', 'view')): ?><a href="?page=delivery_tracking" class="sidebar-link sub<?= $page === 'delivery_tracking' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Tracking</a><?php endif; ?>
                     <?php if (hasPermission('delivery_returns', 'view')): ?><a href="?page=delivery_returns" class="sidebar-link sub<?= $page === 'delivery_returns' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Returns</a><?php endif; ?>
+
                     <div class="sidebar-divider"></div>
                     <?php if (hasPermission('delivery_history', 'view')): ?><a href="?page=delivery_history" class="sidebar-link sub<?= $page === 'delivery_history' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Reports</a><?php endif; ?>
                     <?php endif; ?>
@@ -249,11 +246,11 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
                     <a href="?page=reports&tab=purchase" class="sidebar-link sub<?= $page === 'reports' && ($_GET['tab'] ?? '') === 'purchase' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Purchase Reports</a>
                     <a href="?page=reports&tab=inventory" class="sidebar-link sub<?= $page === 'reports' && ($_GET['tab'] ?? '') === 'inventory' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Inventory Reports</a>
                     <?php if (hasPermission('finance_reports', 'view')): ?><a href="?page=finance_reports" class="sidebar-link sub<?= $page === 'finance_reports' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Financial Reports</a><?php endif; ?>
-                    <a href="?page=reports&tab=delivery" class="sidebar-link sub<?= $page === 'reports' && ($_GET['tab'] ?? '') === 'delivery' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Reports</a>
+
                 </div>
             </div>
             <?php endif; ?>
-            <?php if (hasPermission('users', 'view') || hasPermission('roles', 'view')): ?>
+            <?php if ((hasPermission('users', 'view') || hasPermission('roles', 'view')) && !isSuperAdmin()): ?>
             <div class="sidebar-group<?= in_array($page, ['users','roles']) ? ' open' : '' ?>">
                 <div class="sidebar-group-header" onclick="toggleGroup('umg')"><i class="fas fa-users-cog"></i><span>User Management</span><i class="fas fa-chevron-right chevron"></i></div>
                 <div class="sidebar-group-content" id="group-umg">
@@ -346,16 +343,12 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
                 <div class="sidebar-group-content" id="group-del2">
                     <a href="?page=delivery_dashboard" class="sidebar-link sub<?= $page === 'delivery_dashboard' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Dashboard</a>
                     <a href="?page=delivery_assign" class="sidebar-link sub<?= $page === 'delivery_assign' && ($_GET['tab'] ?? '') !== 'reassign' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Assign Driver</a>
-                    <a href="?page=delivery_assign&tab=reassign" class="sidebar-link sub<?= $page === 'delivery_assign' && ($_GET['tab'] ?? '') === 'reassign' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Reassign Driver</a>
+
                     <a href="?page=delivery_staff" class="sidebar-link sub<?= $page === 'delivery_staff' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Driver Management</a>
                     <div class="sidebar-divider"></div>
-                    <a href="?page=delivery_assign" class="sidebar-link sub<?= $page === 'delivery_assign' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Queue</a>
-                    <a href="?page=delivery_tracking&status=assigned" class="sidebar-link sub<?= $page === 'delivery_tracking' && ($_GET['status'] ?? '') === 'assigned' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Assigned Orders</a>
-                    <a href="?page=delivery_tracking&status=out_for_delivery" class="sidebar-link sub<?= $page === 'delivery_tracking' && ($_GET['status'] ?? '') === 'out_for_delivery' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Out for Delivery</a>
-                    <a href="?page=delivery_tracking" class="sidebar-link sub<?= $page === 'delivery_tracking' && ($_GET['status'] ?? '') === '' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Tracking</a>
-                    <a href="?page=delivery_tracking&status=delivered" class="sidebar-link sub<?= $page === 'delivery_tracking' && ($_GET['status'] ?? '') === 'delivered' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Completed Deliveries</a>
-                    <a href="?page=delivery_tracking&status=failed" class="sidebar-link sub<?= $page === 'delivery_tracking' && ($_GET['status'] ?? '') === 'failed' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Failed Deliveries</a>
+                    <a href="?page=delivery_tracking" class="sidebar-link sub<?= $page === 'delivery_tracking' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Tracking</a>
                     <a href="?page=delivery_returns" class="sidebar-link sub<?= $page === 'delivery_returns' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Returns</a>
+
                     <div class="sidebar-divider"></div>
                     <a href="?page=delivery_history" class="sidebar-link sub<?= $page === 'delivery_history' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Delivery Reports</a>
                 </div>
@@ -373,22 +366,20 @@ $breadcrumbs = $page === 'dashboard' ? [] : [['Home', '?page=dashboard'], [$page
                 </div>
             </div>
             <?php endif; ?>
-            <div class="sidebar-group<?= in_array($page, ['finance_dashboard','supplier_payments','finance_bank','finance_cash','finance_expenses','finance_refunds','finance_accounting','finance_charts','finance_reports','credit_control','credit_reports','customer_statement','ledger']) ? ' open' : '' ?>">
+            <div class="sidebar-group<?= in_array($page, ['finance_payments','supplier_payments','finance_bank','finance_cash','finance_expenses','finance_refunds','finance_accounting','finance_reports','customer_statement','ledger','credit_control','credit_management']) ? ' open' : '' ?>">
                 <div class="sidebar-group-header" onclick="toggleGroup('ffin')"><i class="fas fa-file-invoice-dollar"></i><span>Finance</span><i class="fas fa-chevron-right chevron"></i></div>
                 <div class="sidebar-group-content" id="group-ffin">
-                    <a href="?page=finance_dashboard" class="sidebar-link sub<?= $page === 'finance_dashboard' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Dashboard</a>
                     <a href="?page=finance_payments&tab=customer" class="sidebar-link sub<?= $page === 'finance_payments' ? ' active' : '' ?>"><i class="fas fa-user-check"></i>Customer Payments<?php if ($pendingCustPayments > 0): ?> <span style="background:#7c3aed;color:#fff;border-radius:10px;font-size:0.65rem;padding:1px 7px;font-weight:700"><?= $pendingCustPayments ?></span><?php endif; ?></a>
                     <a href="?page=supplier_payments" class="sidebar-link sub<?= $page === 'supplier_payments' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Supplier Payments</a>
+                    <a href="?page=credit_control" class="sidebar-link sub<?= in_array($page, ['credit_control','credit_management']) ? ' active' : '' ?>"><i class="fas fa-hand-holding-usd"></i>Credit &amp; Outstanding</a>
                     <a href="?page=finance_bank" class="sidebar-link sub<?= $page === 'finance_bank' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Bank Management</a>
                     <a href="?page=finance_cash" class="sidebar-link sub<?= $page === 'finance_cash' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Cash Management</a>
                     <a href="?page=finance_expenses" class="sidebar-link sub<?= $page === 'finance_expenses' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Expenses</a>
                     <a href="?page=finance_refunds" class="sidebar-link sub<?= $page === 'finance_refunds' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Refunds</a>
                     <a href="?page=finance_accounting" class="sidebar-link sub<?= $page === 'finance_accounting' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Accounting</a>
-                    <a href="?page=finance_charts" class="sidebar-link sub<?= $page === 'finance_charts' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Charts</a>
                     <a href="?page=finance_reports" class="sidebar-link sub<?= $page === 'finance_reports' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Reports</a>
                     <a href="?page=customer_statement" class="sidebar-link sub<?= $page === 'customer_statement' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Customer Statement</a>
                     <a href="?page=ledger" class="sidebar-link sub<?= $page === 'ledger' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Customer Ledger</a>
-                    <?php if (isAdmin()): ?><a href="?page=credit_control" class="sidebar-link sub<?= $page === 'credit_control' ? ' active' : '' ?>"><i class="fas fa-circle"></i>Credit Control</a><?php endif; ?>
                 </div>
             </div>
 

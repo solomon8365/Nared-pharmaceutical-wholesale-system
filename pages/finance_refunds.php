@@ -40,9 +40,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $uid = $_SESSION['user']['id'] ?? null;
                 $receiptPath = '';
                 if (!empty($_FILES['receipt']['tmp_name'])) {
-                    $ext = pathinfo($_FILES['receipt']['name'], PATHINFO_EXTENSION);
-                    $refundName = date('Ymd_His') . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
-                    $receiptPath = storage_put($_FILES['receipt']['tmp_name'], 'refunds', $refundName) ?? '';
+                    $upErr = null;
+                    $receiptPath = storage_upload_validated($_FILES['receipt'], 'refunds', 'ref_', null, 5242880, $upErr) ?? '';
+                    if ($upErr) {
+                        throw new RuntimeException('Receipt upload error: ' . $upErr);
+                    }
                 }
                 $pdo->prepare('INSERT INTO refunds (customer_order_id, amount, reason, refunded_at, refunded_by, status, refund_type, receipt_path) VALUES (:oid, :amt, :reason, NOW(), :uid, "completed", "customer", :rp)')->execute(['oid' => $orderId, 'amt' => $amount, 'reason' => $reason, 'uid' => $uid, 'rp' => $receiptPath]);
                 // Auto-record bank transaction if bank account selected

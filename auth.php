@@ -265,6 +265,16 @@ function isStoreManager(): bool
     return currentUser() !== null && userRole() === 'store_manager';
 }
 
+function isManager(): bool
+{
+    return currentUser() !== null && in_array(userRole(), ['manager', 'admin'], true);
+}
+
+function canApproveCreditRequest(): bool
+{
+    return isManager() && hasPermission('credit_management', 'approve');
+}
+
 function customerAccountCustomerId(): ?int
 {
     if (!isCustomer()) {
@@ -604,6 +614,7 @@ function loginForPortal(string $username, string $password, ?string $portal): ?s
     ensureOrderWorkflowRolePermissions($pdo);
     ensureInvoiceViewAllRoles($pdo);
     ensureCoreWorkflowTablesMigration($pdo);
+    ensureCreditManagementRoleSeparation($pdo);
     $stmt = $pdo->prepare('SELECT * FROM users WHERE username = :username LIMIT 1');
     $stmt->execute(['username' => $username]);
     $user = $stmt->fetch();
@@ -731,7 +742,7 @@ function verify_csrf_token(?string $token): bool
 
 function require_csrf(): void
 {
-    $token = $_POST['_csrf_token'] ?? $_GET['csrf_token'] ?? '';
+    $token = $_POST['_csrf_token'] ?? $_POST['csrf_token'] ?? $_GET['csrf_token'] ?? '';
     if (!verify_csrf_token($token)) {
         http_response_code(419);
         die('CSRF token validation failed. Please go back and try again.');

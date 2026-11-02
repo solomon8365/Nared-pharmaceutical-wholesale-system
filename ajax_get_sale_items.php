@@ -2,6 +2,14 @@
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/services/init.php';
 requireLogin();
+
+if (!hasPermission('sales_returns', 'view') && !hasPermission('sales_returns', 'create') && !hasPermission('sales', 'view') && !isAdmin()) {
+    http_response_code(403);
+    header('Content-Type: application/json');
+    echo json_encode(['error' => 'Access denied']);
+    exit;
+}
+
 header('Content-Type: application/json');
 
 $saleId = (int) ($_GET['sale_id'] ?? 0);

@@ -578,7 +578,7 @@ function ofFEfoPlan(array $batches, int $ordered): array
                             <div id="pickPlan-<?= $oid ?>">
                                 <?php foreach ($check['items'] as $it): ?>
                                     <?php
-                                        $fplan = FulfillmentService::fefoPlan($pdo, (int) $it['product_id'], (int) $it['ordered_qty']);
+                                        $fplan = FulfillmentService::fefoPlan($pdo, (int) $it['product_id'], (int) $it['ordered_qty'], (int) $oid);
                                         $ordQty = (int) $it['ordered_qty'];
                                         $pickTotal = array_sum(array_column($fplan['rows'], 'pick'));
                                         $planShort = $fplan['short'];

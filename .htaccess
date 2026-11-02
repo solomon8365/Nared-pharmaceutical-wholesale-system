@@ -1,0 +1,12 @@
+# Disable directory listing
+Options -Indexes
+
+# Protect sensitive files, configuration, and database scripts from direct HTTP requests
+<FilesMatch "(?i)(^\..*|\.env.*|\.sql|\.log|\.md|\.ps1|package.*\.json)$">
+    Require all denied
+</FilesMatch>
+
+# Deny direct access to internal template scripts in pages/
+<FilesMatch "(?i)^pages/.+\.php$">
+    Require all denied
+</FilesMatch>

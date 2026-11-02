@@ -22,6 +22,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
     }
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['bulk_assign'])) {
+    require_csrf();
+    requirePermission('assign_deliveries', 'assign_delivery');
+    $orderIds = array_map('intval', $_POST['order_ids'] ?? []);
+    $staffId = (int) ($_POST['delivery_staff_id'] ?? 0);
+    if (empty($orderIds) || $staffId <= 0) {
+        $messages[] = ['type' => 'error', 'text' => 'Select at least one order and a driver.'];
+    } else {
+        try {
+            $count = WorkflowService::bulkAssignDelivery($pdo, $orderIds, $staffId, $uid);
+            redirect_with_flash('?page=assign_deliveries', $count . ' order(s) assigned successfully.');
+        } catch (ServiceException $e) {
+            $messages[] = ['type' => 'error', 'text' => $e->getMessage()];
+        } catch (Throwable $e) {
+            $messages[] = ['type' => 'error', 'text' => 'Bulk assignment failed: ' . $e->getMessage()];
+        }
+    }
+}
+
 $ready = $pdo->query("SELECT co.id, co.order_date, co.total_amount, co.delivery_address, c.name AS customer_name, u.full_name AS customer_user FROM customer_orders co JOIN customers c ON co.customer_id = c.id LEFT JOIN users u ON co.placed_by_user_id = u.id WHERE co.status = 'approved' AND co.payment_confirmed = 1 AND co.delivery_staff_id IS NULL AND co.fulfillment_method = 'delivery' AND co.fulfillment_status = 'ready_for_delivery' ORDER BY co.order_date ASC")->fetchAll();
 
 $assigned = $pdo->query("SELECT co.id, co.order_date, co.total_amount, co.delivery_status, co.delivery_address, c.name AS customer_name, dp.full_name AS staff_name FROM customer_orders co JOIN customers c ON co.customer_id = c.id LEFT JOIN driver_profiles dp ON co.delivery_staff_id = dp.id WHERE co.delivery_staff_id IS NOT NULL ORDER BY co.created_at DESC LIMIT 50")->fetchAll();
@@ -44,11 +63,17 @@ $deliveryStaff = $pdo->query("SELECT id, full_name FROM driver_profiles WHERE st
                 <?php if (empty($ready)): ?>
                     <p class="hint">No orders ready for delivery assignment.</p>
                 <?php else: ?>
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+                        <label style="display:flex;align-items:center;gap:6px;font-size:0.82rem;font-weight:600">
+                            <input type="checkbox" id="ad-select-all"> Select All
+                        </label>
+                    </div>
                     <table>
-                        <thead><tr><th>Order #</th><th>Customer</th><th>Date</th><th>Total</th><th>Address</th><th>Assign</th></tr></thead>
+                        <thead><tr><th><input type="checkbox" id="ad-select-all-2"></th><th>Order #</th><th>Customer</th><th>Date</th><th>Total</th><th>Address</th><th>Assign</th></tr></thead>
                         <tbody>
                             <?php foreach ($ready as $o): ?>
                                 <tr>
+                                    <td><input type="checkbox" class="ad-cb" value="<?= (int) $o['id'] ?>"></td>
                                     <td><strong>#<?= (int) $o['id'] ?></strong></td>
                                     <td><?= htmlspecialchars($o['customer_name']) ?></td>
                                     <td><?= htmlspecialchars($o['order_date']) ?></td>
@@ -74,6 +99,42 @@ $deliveryStaff = $pdo->query("SELECT id, full_name FROM driver_profiles WHERE st
                             <?php endforeach; ?>
                         </tbody>
                     </table>
+                    <?php if (hasPermission('assign_deliveries', 'assign_delivery')): ?>
+                    <form method="post" id="bulk-assign-form" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="bulk_assign" value="1">
+                        <div id="bulk-ids"></div>
+                        <select name="delivery_staff_id" required style="margin:0;font-size:0.82rem;padding:6px 8px">
+                            <option value="">— Choose Driver for Selected —</option>
+                            <?php foreach ($deliveryStaff as $ds): ?>
+                                <option value="<?= (int) $ds['id'] ?>"><?= htmlspecialchars($ds['full_name']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <button type="submit" style="padding:6px 14px;font-size:0.82rem;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600"><i class="fas fa-users"></i> Assign Selected Orders</button>
+                    </form>
+                    <script>
+                    (function() {
+                        var selectAll1 = document.getElementById('ad-select-all');
+                        var selectAll2 = document.getElementById('ad-select-all-2');
+                        function allCbs(){ return document.querySelectorAll('.ad-cb'); }
+                        function sync(checked){ allCbs().forEach(function(cb){ cb.checked = checked; }); if(selectAll1) selectAll1.checked = checked; if(selectAll2) selectAll2.checked = checked; }
+                        if(selectAll1) selectAll1.addEventListener('change', function(){ sync(this.checked); });
+                        if(selectAll2) selectAll2.addEventListener('change', function(){ sync(this.checked); });
+                        var form = document.getElementById('bulk-assign-form');
+                        if(form) form.addEventListener('submit', function(e){
+                            var container = document.getElementById('bulk-ids');
+                            container.innerHTML = '';
+                            var checked = document.querySelectorAll('.ad-cb:checked');
+                            if(checked.length === 0){ e.preventDefault(); alert('Select at least one order.'); return; }
+                            checked.forEach(function(cb){
+                                var inp = document.createElement('input');
+                                inp.type = 'hidden'; inp.name = 'order_ids[]'; inp.value = cb.value;
+                                container.appendChild(inp);
+                            });
+                        });
+                    })();
+                    </script>
+                    <?php endif; ?>
                 <?php endif; ?>
             </div>
         </div>

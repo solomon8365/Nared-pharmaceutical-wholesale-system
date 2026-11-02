@@ -62,6 +62,16 @@ function creditGetSetting(PDO $pdo, string $key, string $default = '', bool $fre
 }
 
 function isCreditSalesEnabled(): bool {
+    // Read through the credit settings layer (credit_control_settings first, then
+    // the main settings table) so the credit module toggle is honoured here too.
+    try {
+        $pdo = function_exists('getPDO') ? getPDO() : null;
+        if ($pdo) {
+            return creditGetSetting($pdo, 'allow_credit_sales', '1') === '1';
+        }
+    } catch (Throwable $e) {
+        // fall through to default
+    }
     return get_setting('allow_credit_sales', '0') === '1';
 }
 
@@ -172,6 +182,10 @@ function creditGetProfile(PDO $pdo, int $customerId): array {
         'credit_score' => (int) $c['credit_score'],
         'utilization' => $utilization, 'avg_pay_days' => $avgPayDays,
         'customer_status' => $c['customer_status'],
+        'requested_credit_limit' => (float) ($c['requested_credit_limit'] ?? 0),
+        'requested_credit_terms' => isset($c['requested_credit_terms']) ? (int) $c['requested_credit_terms'] : null,
+        'credit_request_notes' => $c['credit_request_notes'] ?? null,
+        'credit_requested_at' => $c['credit_requested_at'] ?? null,
     ];
 }
 
@@ -187,14 +201,18 @@ function creditGetAging(PDO $pdo, ?int $customerId = null): array {
     $stmt->execute($params);
     $invoices = $stmt->fetchAll();
 
-    $now = new DateTime();
+    $today = (new DateTime())->setTime(0, 0, 0);
     foreach ($invoices as $inv) {
         $bal = (float) $inv['outstanding_balance'];
         if (!$inv['credit_due_date']) { $buckets['current'] += $bal; $bucketInvoices['current'][] = $inv; continue; }
-        $due = new DateTime($inv['credit_due_date']);
-        $days = (int) $now->diff($due)->days;
-        if ($due >= $now) { $buckets['current'] += $bal; $bucketInvoices['current'][] = $inv; }
-        elseif ($days <= 30) { $buckets['1_30'] += $bal; $bucketInvoices['1_30'][] = $inv; }
+        $due = (new DateTime($inv['credit_due_date']))->setTime(0, 0, 0);
+        if ($due >= $today) {
+            $buckets['current'] += $bal;
+            $bucketInvoices['current'][] = $inv;
+            continue;
+        }
+        $days = (int) $today->diff($due)->days;
+        if ($days <= 30) { $buckets['1_30'] += $bal; $bucketInvoices['1_30'][] = $inv; }
         elseif ($days <= 60) { $buckets['31_60'] += $bal; $bucketInvoices['31_60'][] = $inv; }
         elseif ($days <= 90) { $buckets['61_90'] += $bal; $bucketInvoices['61_90'][] = $inv; }
         else { $buckets['90_plus'] += $bal; $bucketInvoices['90_plus'][] = $inv; }
@@ -927,4 +945,44 @@ function creditApplyRefund(PDO $pdo, int $customerId, int $orderId, float $amoun
         WorkflowEngine::logStatusChange($pdo, 'invoice', (int) $inv['id'], $inv['payment_status'], $newStatus, $userId, 'Refund applied against credit invoice');
     }
     return ['success' => true, 'msg' => 'Credit outstanding reduced by ' . fmt($apply) . ' on Invoice #' . (int) $inv['id'] . '.', 'applied' => $apply];
+}
+
+// ─── Credit request migration (customer self-service) ─────────
+function creditEnsureRequestMigration(PDO $pdo): void {
+    static $done = false;
+    if ($done) return;
+    $done = true;
+    $hasCol = function (string $col) use ($pdo): bool {
+        $s = $pdo->prepare('SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = "customers" AND COLUMN_NAME = ?');
+        $s->execute([$col]);
+        return ((int) $s->fetchColumn()) > 0;
+    };
+    $addCol = function (string $col, string $def) use ($pdo, $hasCol): void {
+        if (!$hasCol($col)) { try { $pdo->exec("ALTER TABLE customers ADD COLUMN `$col` $def"); } catch (Throwable $e) {} }
+    };
+    $addCol('requested_credit_limit', 'DECIMAL(12,2) NULL DEFAULT 0.00');
+    $addCol('requested_credit_terms', 'INT NULL DEFAULT NULL');
+    $addCol('credit_request_notes', 'TEXT NULL');
+    $addCol('credit_requested_at', 'DATETIME NULL');
+}
+
+function creditRequestCredit(PDO $pdo, int $customerId, float $limit, int $terms, string $notes, int $userId): array {
+    creditEnsureRequestMigration($pdo);
+    if ($customerId <= 0) return ['success' => false, 'msg' => 'Invalid customer.'];
+    if (!is_finite($limit) || $limit <= 0) return ['success' => false, 'msg' => 'Requested limit must be a positive amount.'];
+    if ($terms < 1 || $terms > 365) return ['success' => false, 'msg' => 'Payment terms must be between 1 and 365 days.'];
+    $stmt = $pdo->prepare('SELECT name, credit_limit, credit_approval_status FROM customers WHERE id = :id');
+    $stmt->execute(['id' => $customerId]);
+    $c = $stmt->fetch();
+    if (!$c) return ['success' => false, 'msg' => 'Customer not found.'];
+
+    $oldLimit = (float) ($c['credit_limit'] ?? 0);
+    $notes = trim($notes);
+
+    $pdo->prepare('UPDATE customers SET requested_credit_limit = :l, requested_credit_terms = :t, credit_request_notes = :n, credit_requested_at = NOW(), credit_approval_status = "pending" WHERE id = :id')
+        ->execute(['l' => $limit, 't' => $terms, 'n' => $notes !== '' ? $notes : null, 'id' => $customerId]);
+    
+    $auditDetail = (string) $limit . ($notes !== '' ? ' | Note: ' . $notes : '');
+    creditLogAudit($pdo, $customerId, 'credit_requested', (string) $oldLimit, $auditDetail, $userId);
+    return ['success' => true, 'msg' => 'Credit request submitted successfully. Awaiting approval.'];
 }

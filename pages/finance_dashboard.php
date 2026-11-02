@@ -189,35 +189,27 @@ $maxChartVal = max($maxRevVal, $maxExpVal);
     </div>
     <?php endif; ?>
 
-    <div class="fin-stats">
+    <div class="fin-stats" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
         <div class="fin-stat" onclick="window.location='?page=finance_reports&tab=sales'">
-            <div class="fin-stat-icon" style="background:linear-gradient(135deg,#2563eb,#1d4ed8)"><i class="fas fa-shopping-cart"></i></div>
+            <div class="fin-stat-icon" style="background:linear-gradient(135deg,#2563eb,#1d4ed8)"><i class="fas fa-chart-area"></i></div>
             <div class="fin-stat-body">
-                <div class="fin-stat-val" data-counter="<?= $todaySales ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
-                <div class="fin-stat-label">Today's Sales</div>
-                <div class="fin-stat-change <?= $ch['dir'] ?>"><i class="fas fa-arrow-<?= $ch['dir'] === 'up' ? 'up' : ($ch['dir'] === 'down' ? 'down' : 'right') ?>"></i> <?= $ch['pct'] ?>%</div>
-            </div>
-        </div>
-        <div class="fin-stat" onclick="window.location='?page=finance_payments'">
-            <div class="fin-stat-icon" style="background:linear-gradient(135deg,#059669,#047857)"><i class="fas fa-hand-holding-usd"></i></div>
-            <div class="fin-stat-body">
-                <div class="fin-stat-val" data-counter="<?= $todayCollections ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
-                <div class="fin-stat-label">Today's Collections</div>
-                <div class="fin-stat-change <?= $chCol['dir'] ?>"><i class="fas fa-arrow-<?= $chCol['dir'] === 'up' ? 'up' : ($chCol['dir'] === 'down' ? 'down' : 'right') ?>"></i> <?= $chCol['pct'] ?>%</div>
+                <div class="fin-stat-val" data-counter="<?= $monthRev ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
+                <div class="fin-stat-label">Total Revenue</div>
+                <div class="fin-stat-change <?= $chRev['dir'] ?>"><i class="fas fa-arrow-<?= $chRev['dir'] === 'up' ? 'up' : ($chRev['dir'] === 'down' ? 'down' : 'right') ?>"></i> <?= $chRev['pct'] ?>%</div>
             </div>
         </div>
         <div class="fin-stat" onclick="window.location='?page=finance_reports'">
             <div class="fin-stat-icon" style="background:linear-gradient(135deg,#d97706,#b45309)"><i class="fas fa-file-invoice-dollar"></i></div>
             <div class="fin-stat-body">
                 <div class="fin-stat-val" data-counter="<?= $outRec ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
-                <div class="fin-stat-label">Outstanding Receivables</div>
+                <div class="fin-stat-label">Outstanding Customer Receivables</div>
             </div>
         </div>
         <div class="fin-stat" onclick="window.location='?page=supplier_payments'">
             <div class="fin-stat-icon" style="background:linear-gradient(135deg,#dc2626,#b91c1c)"><i class="fas fa-file-contract"></i></div>
             <div class="fin-stat-body">
                 <div class="fin-stat-val" data-counter="<?= $outPay ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
-                <div class="fin-stat-label">Outstanding Payables</div>
+                <div class="fin-stat-label">Outstanding Supplier Payables</div>
             </div>
         </div>
         <div class="fin-stat" onclick="window.location='?page=finance_bank'">
@@ -234,43 +226,6 @@ $maxChartVal = max($maxRevVal, $maxExpVal);
                 <div class="fin-stat-label">Cash Balance</div>
             </div>
         </div>
-        <div class="fin-stat" onclick="window.location='?page=finance_reports'">
-            <div class="fin-stat-icon" style="background:linear-gradient(135deg,#4f46e5,#4338ca)"><i class="fas fa-chart-area"></i></div>
-            <div class="fin-stat-body">
-                <div class="fin-stat-val" data-counter="<?= $monthRev ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
-                <div class="fin-stat-label">Monthly Revenue</div>
-                <div class="fin-stat-change <?= $chRev['dir'] ?>"><i class="fas fa-arrow-<?= $chRev['dir'] === 'up' ? 'up' : ($chRev['dir'] === 'down' ? 'down' : 'right') ?>"></i> <?= $chRev['pct'] ?>%</div>
-            </div>
-        </div>
-        <div class="fin-stat" onclick="window.location='?page=finance_reports&tab=profit'">
-            <div class="fin-stat-icon" style="background:linear-gradient(135deg,#dc2626,#b91c1c)"><i class="fas fa-truck"></i></div>
-            <div class="fin-stat-body">
-                <div class="fin-stat-val" data-counter="<?= $monthCOGS ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
-                <div class="fin-stat-label">COGS (Cost of Goods Sold)</div>
-            </div>
-        </div>
-        <div class="fin-stat" onclick="window.location='?page=finance_reports&tab=profit'">
-            <div class="fin-stat-icon" style="background:linear-gradient(135deg,#d97706,#b45309)"><i class="fas fa-coins"></i></div>
-            <div class="fin-stat-body">
-                <div class="fin-stat-val" data-counter="<?= $grossProfit ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
-                <div class="fin-stat-label">Gross Profit</div>
-            </div>
-        </div>
-        <div class="fin-stat" onclick="window.location='?page=finance_expenses'">
-            <div class="fin-stat-icon" style="background:linear-gradient(135deg,#ea580c,#c2410c)"><i class="fas fa-receipt"></i></div>
-            <div class="fin-stat-body">
-                <div class="fin-stat-val" data-counter="<?= $monthExp ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
-                <div class="fin-stat-label">Expenses</div>
-                <div class="fin-stat-change <?= $chExp['dir'] ?>"><i class="fas fa-arrow-<?= $chExp['dir'] === 'up' ? 'up' : ($chExp['dir'] === 'down' ? 'down' : 'right') ?>"></i> <?= $chExp['pct'] ?>%</div>
-            </div>
-        </div>
-        <div class="fin-stat" onclick="window.location='?page=finance_refunds'">
-            <div class="fin-stat-icon" style="background:linear-gradient(135deg,#db2777,#be185d)"><i class="fas fa-undo-alt"></i></div>
-            <div class="fin-stat-body">
-                <div class="fin-stat-val" data-counter="<?= $refunds ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
-                <div class="fin-stat-label">Refunds</div>
-            </div>
-        </div>
         <div class="fin-stat" onclick="window.location='?page=finance_reports&tab=profit'">
             <div class="fin-stat-icon" style="background:linear-gradient(135deg,#059669,#16a34a)"><i class="fas fa-chart-pie"></i></div>
             <div class="fin-stat-body">
@@ -284,24 +239,6 @@ $maxChartVal = max($maxRevVal, $maxExpVal);
                 <div class="fin-stat-val" data-counter="<?= $pendingApprovals + $pendingCustSubmissions ?>" data-prefix="" data-suffix="">0</div>
                 <div class="fin-stat-label">Pending Payment Approvals</div>
                 <?php if ($pendingCustSubmissions > 0): ?><div class="fin-stat-change up" style="color:#7c3aed"><i class="fas fa-user-check"></i> <?= (int) $pendingCustSubmissions ?> customer<?= $pendingCustSubmissions === 1 ? '' : 's' ?></div><?php endif; ?>
-            </div>
-        </div>
-        <?php if ($canCredit): ?>
-        <div class="fin-stat" onclick="window.location='?page=credit_management'">
-            <div class="fin-stat-icon" style="background:linear-gradient(135deg,#7c3aed,#6d28d9)"><i class="fas fa-file-invoice-dollar"></i></div>
-            <div class="fin-stat-body">
-                <div class="fin-stat-val" data-counter="<?= $creditOutstanding ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
-                <div class="fin-stat-label">Credit Outstanding</div>
-                <div class="fin-stat-change <?= $creditOverdue > 0 ? 'down' : 'up' ?>"><i class="fas fa-arrow-<?= $creditOverdue > 0 ? 'down' : 'up' ?>"></i> <?= $creditOverdue > 0 ? $creditOverdue . ' overdue' : 'No overdue' ?><?= $creditPending > 0 ? ' · ' . $creditPending . ' pending' : '' ?></div>
-            </div>
-        </div>
-        <?php endif; ?>
-        <div class="fin-stat">
-            <div class="fin-stat-icon" style="background:linear-gradient(135deg,#0891b2,#0e7490)"><i class="fas fa-exchange-alt"></i></div>
-            <div class="fin-stat-body">
-                <div class="fin-stat-val" data-counter="<?= $netCashFlow ?>" data-prefix="<?= currency_sym() ?> " data-decimals="2"><?= currency_sym() ?> 0.00</div>
-                <div class="fin-stat-label">Net Cash Flow</div>
-                <div class="fin-stat-change <?= $netCashFlow >= 0 ? 'up' : 'down' ?>"><i class="fas fa-arrow-<?= $netCashFlow >= 0 ? 'up' : 'down' ?>"></i> <?= round(abs($netCashFlow) / max($cashOutflow, 1) * 100, 1) ?>%</div>
             </div>
         </div>
     </div>

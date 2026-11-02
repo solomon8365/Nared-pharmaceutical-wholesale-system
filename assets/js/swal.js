@@ -21,6 +21,7 @@
   /* ── Inject badge / animation CSS once ──────────────────────────────── */
   var style = document.createElement('style');
   style.textContent = [
+    '.swal2-container{z-index:20000 !important}',
     '.swal2-html-container .swal-custom{overflow:visible}',
     '.swal2-popup.swal2-popup.swal-custom-popup{overflow:visible}',
     '.swal2-icon.swal2-icon-fa{border:none !important;background:none !important;width:64px !important;height:64px !important;margin:8px auto 12px !important;opacity:0;transform:scale(0) rotate(-15deg);transition:opacity .35s ease,transform .45s cubic-bezier(.17,.89,.32,1.28);animation:none !important}',

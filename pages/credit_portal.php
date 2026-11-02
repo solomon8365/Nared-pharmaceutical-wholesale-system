@@ -6,30 +6,24 @@ $pdo = getPDO();
 $cid = customerAccountCustomerId();
 if ($cid === null) { echo '<div class="panel"><p>Your account is not linked to a customer profile.</p></div>'; return; }
 
+creditEnsureRequestMigration($pdo);
 $profile = creditGetProfile($pdo, $cid);
 if (empty($profile)) { echo '<div class="panel"><p>Customer profile not found.</p></div>'; return; }
 
 $messages = [];
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['_action']) && $_POST['_action'] === 'pay_now') {
-    require_csrf();
-    $amount = (float)($_POST['amount'] ?? 0);
-    $method = $_POST['payment_method'] ?? 'cash';
-    $ref = trim($_POST['reference_no'] ?? '');
-    $payDate = $_POST['payment_date'] ?? date('Y-m-d');
+// Customer self-payment removed: credit payments are now managed and verified by Finance staff.
 
-    if ($amount <= 0) {
-        $messages[] = ['type' => 'error', 'text' => 'Please enter a valid amount.'];
-    } elseif ($ref === '') {
-        $messages[] = ['type' => 'error', 'text' => 'A payment reference number is required.'];
-    } elseif ($amount > $profile['outstanding_balance']) {
-        $messages[] = ['type' => 'error', 'text' => 'Amount exceeds outstanding balance of ' . fmt($profile['outstanding_balance']) . '.'];
-    } else {
-        $payErr = '';
-        $ok = creditRecordPayment($pdo, $cid, $amount, $payDate, $method, $ref, 'Customer self-payment', (int)($_SESSION['user']['id'] ?? 0), $payErr);
-        $messages[] = $ok ? ['type' => 'success', 'text' => 'Payment of ' . fmt($amount) . ' recorded successfully!'] : ['type' => 'error', 'text' => $payErr !== '' ? $payErr : 'Failed to record payment.'];
-        $profile = creditGetProfile($pdo, $cid);
-    }
+// Handle credit request
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['_action']) && $_POST['_action'] === 'request_credit') {
+    require_csrf();
+    $limit = (float) ($_POST['requested_limit'] ?? 0);
+    $terms = (int) ($_POST['requested_terms'] ?? 30);
+    $notes = trim($_POST['request_notes'] ?? '');
+    $res = creditRequestCredit($pdo, $cid, $limit, $terms, $notes, (int) ($_SESSION['user']['id'] ?? 0));
+    $messages[] = ['type' => $res['success'] ? 'success' : 'error', 'text' => $res['msg']];
+    creditEnsureRequestMigration($pdo);
+$profile = creditGetProfile($pdo, $cid);
 }
 
 $myInvoices = $pdo->prepare("SELECT * FROM invoices WHERE customer_id = :cid ORDER BY generated_at DESC");
@@ -176,7 +170,8 @@ $tab = $_GET['tab'] ?? 'overview';
     <a href="?page=credit_portal&tab=overview" class="cp-tab <?= $tab==='overview'?'active':'' ?>"><i class="fas fa-file-invoice"></i> Invoices</a>
     <a href="?page=credit_portal&tab=payments" class="cp-tab <?= $tab==='payments'?'active':'' ?>"><i class="fas fa-history"></i> Payment History</a>
     <a href="?page=credit_portal&tab=aging" class="cp-tab <?= $tab==='aging'?'active':'' ?>"><i class="fas fa-layer-group"></i> Aging</a>
-    <a href="?page=credit_portal&tab=pay" class="cp-tab <?= $tab==='pay'?'active':'' ?>"><i class="fas fa-credit-card"></i> Pay Now</a>
+    <!-- Pay Now removed: credit payments are managed and verified by Finance staff -->
+<a href="?page=credit_portal&tab=request" class="cp-tab <?= $tab==='request'?'active':'' ?>"><i class="fas fa-hand-holding-usd"></i> Request Credit</a>
 </div>
 
 <?php if ($tab === 'overview'): ?>
@@ -263,31 +258,32 @@ $tab = $_GET['tab'] ?? 'overview';
 
 <?php elseif ($tab === 'pay'): ?>
 <div class="cp-panel">
-    <div class="cp-panel-head"><div class="cp-panel-title"><i class="fas fa-credit-card"></i> Make a Payment</div></div>
+    <div class="cp-panel-head"><div class="cp-panel-title"><i class="fas fa-credit-card"></i> Payments</div></div>
     <div class="cp-panel-body">
-    <?php if ($profile['outstanding_balance'] <= 0): ?>
-    <div class="cp-empty"><i class="fas fa-check-circle" style="color:#16a34a"></i><p><strong>No outstanding balance!</strong></p><p>You're all paid up.</p></div>
-    <?php else: ?>
+        <div class="cp-empty"><i class="fas fa-user-shield"></i><p><strong>Credit payments are managed and verified by Finance staff.</strong></p><p>To pay, submit your payment proof on the <a href="?page=payments" style="color:#2563eb;font-weight:600">Payments</a> page. Finance will verify and record it against your credit account.</p></div>
+    </div>
+</div>
+
+<?php elseif ($tab === 'request'): ?>
+<div class="cp-panel">
+    <div class="cp-panel-head"><div class="cp-panel-title"><i class="fas fa-hand-holding-usd"></i> Request Credit</div></div>
+    <div class="cp-panel-body">
+    <?php if (($profile['credit_approval_status'] ?? '') === 'pending'): ?>
+        <div class="cp-empty" style="padding:16px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;margin-bottom:16px"><i class="fas fa-clock" style="color:#f59e0b"></i><p><strong>Your credit request is pending approval by Management.</strong></p>
+        <?php if ((float)($profile['requested_credit_limit'] ?? 0) > 0): ?><p>Requested limit: <?= fmt((float)$profile['requested_credit_limit']) ?> &middot; Terms: <?= (int)($profile['requested_credit_terms'] ?? 0) ?> days</p><?php endif; ?>
+        <?php if (!empty($profile['credit_request_notes'])): ?><div style="margin-top:8px;background:#fff;padding:8px 12px;border-radius:6px;border:1px solid #fef3c7;font-size:0.85rem;color:#334155;text-align:left"><strong>Submitted Note:</strong> <?= htmlspecialchars($profile['credit_request_notes']) ?></div><?php endif; ?>
+        <p style="font-size:0.8rem;color:#92400e;margin-top:8px">You can update your requested limit, terms, and note below:</p></div>
+    <?php elseif (($profile['credit_approval_status'] ?? '') === 'approved' && (float)$profile['credit_limit'] > 0): ?>
+        <div class="cp-empty" style="padding:16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;margin-bottom:16px"><i class="fas fa-check-circle" style="color:#16a34a"></i><p style="margin:0 0 4px"><strong>Active Credit Limit: <?= fmt($profile['credit_limit']) ?></strong> (Terms: <?= (int)$profile['credit_terms_days'] ?> days)</p><p style="margin:0;font-size:0.85rem;color:#15803d">Need a credit limit increase? Add your note and submit below.</p></div>
+    <?php endif; ?>
         <form method="post" class="cp-form">
             <?= csrf_field() ?>
-            <input type="hidden" name="_action" value="pay_now">
-            <div class="cp-fg"><label>Outstanding Balance</label><input type="text" value="<?= fmt($profile['outstanding_balance']) ?>" readonly style="background:#f8fafc;font-weight:700;color:#dc2626"></div>
-            <div class="cp-fg-row">
-                <div class="cp-fg"><label>Payment Amount (ETB) *</label><input type="number" name="amount" min="0.01" max="<?= (float)$profile['outstanding_balance'] ?>" step="0.01" required placeholder="Enter amount"></div>
-                <div class="cp-fg"><label>Payment Date *</label><input type="date" name="payment_date" value="<?= date('Y-m-d') ?>" required></div>
-            </div>
-            <div class="cp-fg-row">
-                <div class="cp-fg"><label>Payment Method *</label><select name="payment_method" required>
-                    <option value="cash">Cash</option>
-                    <option value="bank">Bank Transfer</option>
-                    <option value="telebirr">Telebirr</option>
-                    <option value="cbe_birr">CBE Birr</option>
-                </select></div>
-                <div class="cp-fg"><label>Reference Number</label><input type="text" name="reference_no" placeholder="Transaction reference" required></div>
-            </div>
-            <button type="submit" class="cp-btn cp-btn-primary"><i class="fas fa-check-circle"></i> Submit Payment</button>
+            <input type="hidden" name="_action" value="request_credit">
+            <div class="cp-fg"><label>Requested Credit Limit (<?= currency_sym() ?>) *</label><input type="number" name="requested_limit" min="1" step="0.01" required placeholder="e.g. 50000"></div>
+            <div class="cp-fg"><label>Requested Payment Terms (days) *</label><input type="number" name="requested_terms" min="1" max="365" value="30" required></div>
+            <div class="cp-fg"><label>Note / Reason for Credit Request *</label><textarea name="request_notes" rows="3" required placeholder="Add a note explaining your credit request (e.g. inventory expansion, seasonal purchase volume)"></textarea></div>
+            <button type="submit" class="cp-btn cp-btn-primary"><i class="fas fa-paper-plane"></i> Submit Request</button>
         </form>
-    <?php endif; ?>
     </div>
 </div>
 <?php endif; ?>

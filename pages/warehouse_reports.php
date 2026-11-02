@@ -225,12 +225,38 @@ if ($tab === 'stock_summary') {
             JOIN purchase_order_items poi ON poi.purchase_order_id = po.id
             JOIN products p ON p.id = poi.product_id
             WHERE poi.received_qty > 0";
-    $rows = $pdo->query($sql)->fetchAll();
-    if ($dateFrom !== '') { $rows = array_values(array_filter($rows, fn($r) => $r['received_at'] >= $dateFrom || ($r['received_at'] === null && $r['order_date'] >= $dateFrom))); }
-    if ($dateTo !== '') { $rows = array_values(array_filter($rows, fn($r) => ($r['received_at'] !== null ? substr($r['received_at'], 0, 10) : substr($r['order_date'], 0, 10)) <= $dateTo)); }
-    if ($statusFilter !== '') { $rows = array_values(array_filter($rows, fn($r) => $r['status'] === $statusFilter)); }
-    if ($productFilter) { $rows = array_values(array_filter($rows, fn($r) => (int)$r['product_id'] === $productFilter)); }
-    if ($search !== '') { $rows = array_values(array_filter($rows, fn($r) => stripos($r['supplier_name'] . ' ' . $r['product_name'] . ' #' . $r['po_id'], $search) !== false)); }
+    $whereSql = [];
+    $params = [];
+    if ($dateFrom !== '') {
+        $whereSql[] = "(po.received_at >= :df OR (po.received_at IS NULL AND po.order_date >= :df2))";
+        $params['df'] = $dateFrom;
+        $params['df2'] = $dateFrom;
+    }
+    if ($dateTo !== '') {
+        $whereSql[] = "(COALESCE(DATE(po.received_at), DATE(po.order_date)) <= :dt)";
+        $params['dt'] = $dateTo;
+    }
+    if ($statusFilter !== '') {
+        $whereSql[] = "po.status = :st";
+        $params['st'] = $statusFilter;
+    }
+    if ($productFilter) {
+        $whereSql[] = "poi.product_id = :pf";
+        $params['pf'] = $productFilter;
+    }
+    if ($search !== '') {
+        $whereSql[] = "(s.name LIKE :sr1 OR p.name LIKE :sr2 OR CONCAT('#', po.id) LIKE :sr3)";
+        $params['sr1'] = "%$search%";
+        $params['sr2'] = "%$search%";
+        $params['sr3'] = "%$search%";
+    }
+    if (!empty($whereSql)) {
+        $sql .= " AND " . implode(" AND ", $whereSql);
+    }
+    $sql .= " ORDER BY po.id DESC";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll();
     $totalRecv = 0; $totalVal = 0;
     foreach ($rows as $r) { $totalRecv += (int)$r['received_qty']; $totalVal += (float)$r['received_qty'] * (float)$r['unit_price']; }
 
@@ -359,11 +385,33 @@ if ($tab === 'stock_summary') {
             JOIN products p ON p.id = coi.product_id
             LEFT JOIN users u ON u.id = co.picker_id
             WHERE co.fulfillment_method IS NOT NULL AND co.fulfillment_method <> ''";
-    $rows = $pdo->query($sql)->fetchAll();
-    if ($dateFrom !== '') { $rows = array_values(array_filter($rows, fn($r) => $r['order_date'] >= $dateFrom)); }
-    if ($dateTo !== '') { $rows = array_values(array_filter($rows, fn($r) => substr($r['order_date'], 0, 10) <= $dateTo)); }
-    if ($statusFilter !== '') { $rows = array_values(array_filter($rows, fn($r) => $r['fulfillment_status'] === $statusFilter)); }
-    if ($search !== '') { $rows = array_values(array_filter($rows, fn($r) => stripos('#' . $r['id'] . ' ' . $r['customer_name'] . ' ' . $r['product_name'], $search) !== false)); }
+    $whereSql = [];
+    $params = [];
+    if ($dateFrom !== '') {
+        $whereSql[] = "co.order_date >= :df";
+        $params['df'] = $dateFrom;
+    }
+    if ($dateTo !== '') {
+        $whereSql[] = "DATE(co.order_date) <= :dt";
+        $params['dt'] = $dateTo;
+    }
+    if ($statusFilter !== '') {
+        $whereSql[] = "co.fulfillment_status = :st";
+        $params['st'] = $statusFilter;
+    }
+    if ($search !== '') {
+        $whereSql[] = "(CONCAT('#', co.id) LIKE :sr1 OR c.name LIKE :sr2 OR p.name LIKE :sr3)";
+        $params['sr1'] = "%$search%";
+        $params['sr2'] = "%$search%";
+        $params['sr3'] = "%$search%";
+    }
+    if (!empty($whereSql)) {
+        $sql .= " AND " . implode(" AND ", $whereSql);
+    }
+    $sql .= " ORDER BY co.id DESC";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll();
     $pickedOrders = count(array_filter($rows, fn($r) => in_array($r['picking_status'], ['picked', 'ready_for_delivery'], true)));
 
     $cards = [

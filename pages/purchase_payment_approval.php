@@ -38,15 +38,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $messages[] = ['type' => 'error', 'text' => 'Payment method is required.'];
                     } else {
                         if (!empty($_FILES['payment_receipt']['name'])) {
-                            $allowedTypes = ['application/pdf', 'image/jpeg', 'image/png'];
-                            if (!in_array($_FILES['payment_receipt']['type'], $allowedTypes)) {
-                                $messages[] = ['type' => 'error', 'text' => 'Receipt must be PDF, JPG, or PNG.'];
-                            } elseif ($_FILES['payment_receipt']['size'] > 5 * 1024 * 1024) {
-                                $messages[] = ['type' => 'error', 'text' => 'Receipt file must be under 5MB.'];
-                            } else {
-                                $ext = strtolower(pathinfo($_FILES['payment_receipt']['name'], PATHINFO_EXTENSION));
-                                $receiptName = 'payment_receipt_' . $poId . '_' . time() . '.' . $ext;
-                                $receiptPath = storage_put($_FILES['payment_receipt']['tmp_name'], '', $receiptName) ?? '';
+                            $upErr = null;
+                            $allowedMimes = ['application/pdf' => 'pdf', 'image/jpeg' => 'jpg', 'image/png' => 'png'];
+                            $receiptPath = storage_upload_validated($_FILES['payment_receipt'], 'receipts', 'po_pay_' . $poId . '_', $allowedMimes, 5 * 1024 * 1024, $upErr) ?? '';
+                            if ($upErr) {
+                                $messages[] = ['type' => 'error', 'text' => 'Receipt upload error: ' . $upErr];
                             }
                         }
 

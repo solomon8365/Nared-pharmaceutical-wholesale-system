@@ -111,9 +111,56 @@ $canCreate  = hasPermission('customers', 'create');
 $regActive  = $canApprove && $pendingCount > 0;
 $defaultTab = $regActive ? 'cust-reg' : ($canCreate ? 'cust-add' : 'cust-list');
 ?>
-<style>@media(max-width:768px){.mob-grid-2{grid-template-columns:1fr!important}}</style>
-<section>
+<style>
+@media(max-width:768px){.mob-grid-2{grid-template-columns:1fr!important}}
+.cust-page{max-width:1300px;margin:0 auto}
+.cust-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
+.cust-stat{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.cust-stat-val{font-size:1.3rem;font-weight:800;color:#0f172a}
+.cust-stat-label{font-size:.72rem;color:#64748b;margin-top:2px}
+.cust-card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.06);margin-bottom:16px}
+.cust-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}
+.cust-table th{text-align:left;padding:10px 12px;background:#f8fafc;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+.cust-table td{padding:10px 12px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+.cust-table tbody tr:hover{background:#f8fafc}
+.cust-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:600}
+.cust-badge-active{background:#dcfce7;color:#166534}
+.cust-badge-inactive{background:#f1f5f9;color:#64748b}
+.cust-badge-suspended{background:#fee2e2;color:#991b1b}
+.cust-btn{padding:6px 12px;border:none;border-radius:8px;font-size:.78rem;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;font-family:inherit;text-decoration:none}
+.cust-btn-primary{background:#2563eb;color:#fff}
+.cust-btn-outline{background:transparent;border:1px solid #cbd5e1;color:#475569}
+.cust-btn-sm{padding:3px 8px;font-size:.75rem}
+.cust-search{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.cust-search input{padding:8px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:.85rem;font-family:inherit;min-width:200px;flex:1}
+.cust-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:16px;padding:6px;background:#f1f5f9;border-radius:12px}
+.cust-tabs .tab-btn{padding:8px 14px;border:none;background:transparent;border-radius:8px;font-size:.82rem;font-weight:600;color:#475569;cursor:pointer;display:inline-flex;align-items:center;gap:6px;font-family:inherit}
+.cust-tabs .tab-btn.active{background:#fff;color:#2563eb;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.cust-panel{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.06);margin-bottom:16px}
+.cust-panel h2{font-size:1rem;font-weight:700;color:#0f172a;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+.cust-form label{display:block;font-size:.8rem;font-weight:600;color:#475569;margin-bottom:4px}
+.cust-form input,.cust-form select,.cust-form textarea{width:100%;padding:9px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:.85rem;font-family:inherit;box-sizing:border-box}
+.cust-form input:focus,.cust-form select:focus,.cust-form textarea:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.15)}
+.cust-form textarea{resize:vertical;min-height:60px}
+.cust-form .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+.cust-form .actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
+.cust-empty{text-align:center;padding:30px;color:#94a3b8}
+.cust-empty i{font-size:2rem;color:#cbd5e1;display:block;margin-bottom:8px}
+@media(max-width:768px){.cust-table{font-size:.78rem}.cust-table th,.cust-table td{padding:8px 6px}}
+</style>
+<section class="cust-page">
     <h1>Business Customers</h1>
+    <?php
+    $custTotal = count($customers);
+    $custActive = count(array_filter($customers, fn($c) => ($c['customer_status'] ?? 'active') === 'active'));
+    $custPending = $pendingCount;
+    ?>
+    <div class="cust-stats">
+        <div class="cust-stat"><div class="cust-stat-val"><?= $custTotal ?></div><div class="cust-stat-label">Total Customers</div></div>
+        <div class="cust-stat"><div class="cust-stat-val"><?= $custActive ?></div><div class="cust-stat-label">Active</div></div>
+        <div class="cust-stat"><div class="cust-stat-val"><?= $custPending ?></div><div class="cust-stat-label">Pending Registrations</div></div>
+        <div class="cust-stat"><div class="cust-stat-val"><?= count($pendingUsers) ?></div><div class="cust-stat-label">Applications</div></div>
+    </div>
     <?php foreach ($messages as $message): ?>
         <div class="alert alert-<?= htmlspecialchars($message['type']) ?>"><?= htmlspecialchars($message['text']) ?></div>
     <?php endforeach; ?>
@@ -121,7 +168,7 @@ $defaultTab = $regActive ? 'cust-reg' : ($canCreate ? 'cust-add' : 'cust-list');
     <?php if ($editCustomer && hasPermission('customers', 'edit')): ?>
         <div class="panel" style="max-width:700px;margin-bottom:16px">
             <h2>Edit customer #<?= htmlspecialchars((string) $editCustomer['id']) ?></h2>
-            <form method="post" class="form-grid">
+            <form method="post" class="form-grid cust-form">
                 <?= csrf_field() ?>
                 <input type="hidden" name="_action" value="update">
                 <input type="hidden" name="customer_id" value="<?= htmlspecialchars((string) $editCustomer['id']) ?>">
@@ -159,7 +206,7 @@ $defaultTab = $regActive ? 'cust-reg' : ($canCreate ? 'cust-add' : 'cust-list');
         </div>
     <?php endif; ?>
 
-    <div class="tab-bar">
+    <div class="tab-bar cust-tabs">
         <?php if ($canApprove): ?>
         <button class="tab-btn<?= $regActive ? ' active' : '' ?>" onclick="switchTab(this,'cust-reg')"><i class="fas fa-user-clock"></i> Registrations<?= $pendingCount > 0 ? ' (' . $pendingCount . ')' : '' ?></button>
         <?php endif; ?>
@@ -172,9 +219,9 @@ $defaultTab = $regActive ? 'cust-reg' : ($canCreate ? 'cust-add' : 'cust-list');
     <div class="tab-content">
         <?php if ($canCreate): ?>
         <div id="cust-add" class="tab-panel<?= $defaultTab === 'cust-add' ? ' active' : '' ?>">
-            <div class="panel">
+            <div class="panel cust-panel">
                 <h2>Add business customer</h2>
-                <form method="post" class="form-grid" style="max-width:700px">
+                <form method="post" class="form-grid cust-form" style="max-width:700px">
                     <?= csrf_field() ?>
                     <input type="hidden" name="_action" value="create">
                     <div class="mob-grid-2" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
@@ -208,10 +255,10 @@ $defaultTab = $regActive ? 'cust-reg' : ($canCreate ? 'cust-add' : 'cust-list');
             </div>
         </div>
         <div id="cust-portal" class="tab-panel">
-            <div class="panel">
+            <div class="panel cust-panel">
                 <h2>Customer portal login</h2>
                 <p class="hint">Customers can also <a href="index.php?page=register">register themselves</a> and order online. Create a login here if you prefer to set one up for them.</p>
-                <form method="post" class="form-grid" style="max-width:500px">
+                <form method="post" class="form-grid cust-form" style="max-width:500px">
                     <?= csrf_field() ?>
                     <input type="hidden" name="create_customer_login" value="1">
                     <label>Customer
@@ -231,7 +278,7 @@ $defaultTab = $regActive ? 'cust-reg' : ($canCreate ? 'cust-add' : 'cust-list');
         <?php endif; ?>
         <?php if ($canApprove): ?>
         <div id="cust-reg" class="tab-panel<?= $regActive ? ' active' : '' ?>">
-            <div class="panel">
+            <div class="panel cust-panel">
                 <h2>Customer registrations</h2>
                 <p class="hint">Applications submitted from the public registration page. Verify the <strong>licence number</strong> and <strong>TIN number</strong> before approving — the customer cannot sign in until you do.</p>
                 <div style="overflow-x:auto">
@@ -294,16 +341,16 @@ $defaultTab = $regActive ? 'cust-reg' : ($canCreate ? 'cust-add' : 'cust-list');
         </div>
         <?php endif; ?>
         <div id="cust-list" class="tab-panel<?= $defaultTab === 'cust-list' ? ' active' : '' ?>">
-            <div class="panel">
+            <div class="panel cust-panel">
                 <h2>Customer list</h2>
-                <form method="get" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
+                <form method="get" class="cust-search">
                     <input type="hidden" name="page" value="customers">
-                    <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Search customers..." style="flex:1;margin:0">
-                    <button type="submit" style="margin:0">Search</button>
-                    <?php if ($search !== ''): ?><a href="?page=customers" style="display:inline-flex;align-items:center;padding:0 12px;color:var(--brown-800);font-weight:600">Clear</a><?php endif; ?>
+                    <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Search customers...">
+                    <button type="submit" class="cust-btn cust-btn-primary cust-btn-sm"><i class="fas fa-search"></i> Search</button>
+                    <?php if ($search !== ''): ?><a href="?page=customers" class="cust-btn cust-btn-outline cust-btn-sm">Clear</a><?php endif; ?>
                 </form>
                 <div style="overflow-x:auto">
-                <table>
+                <table class="cust-table">
                     <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>License</th><th>TIN</th><th>Contact</th><th>Phone</th><th>Email</th><th>Credit Limit</th><th>Status</th><th>Portal</th><th>Actions</th></tr></thead>
                     <tbody>
                         <?php if (empty($customers)): ?>
@@ -323,7 +370,7 @@ $defaultTab = $regActive ? 'cust-reg' : ($canCreate ? 'cust-add' : 'cust-list');
                                     <td><?= htmlspecialchars((string) ($customer['phone'] ?? '')) ?></td>
                                     <td><?= htmlspecialchars($customer['email'] ?? '—') ?></td>
                                     <td style="font-size:0.82rem"><?= fmt((float) ($customer['credit_limit'] ?? 0)) ?></td>
-                                    <td><span style="display:inline-block;padding:2px 6px;border-radius:3px;font-size:0.72rem;font-weight:700;background:<?= $csColor ?>20;color:<?= $csColor ?>"><?= ucfirst($cs) ?></span></td>
+                                    <td><span class="cust-badge <?= $cs === 'active' ? 'cust-badge-active' : ($cs === 'inactive' ? 'cust-badge-inactive' : 'cust-badge-suspended') ?>"><?= ucfirst($cs) ?></span></td>
                                     <td><?= $customer['portal_username'] ? htmlspecialchars((string) $customer['portal_username']) : '—' ?></td>
                                     <td>
                                         <?php if (hasPermission('customers', 'edit')): ?>

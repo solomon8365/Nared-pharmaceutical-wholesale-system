@@ -48,6 +48,12 @@ class DeliveryService
         if (!$driver) {
             return ['success' => false, 'msg' => 'Driver profile not found.'];
         }
+        if (($driver['availability'] ?? '') === 'on_delivery') {
+            return ['success' => false, 'msg' => 'Driver is currently out for delivery and cannot receive new assignments.'];
+        }
+        if (delCountActiveOrders($pdo, $driverId) >= delMaxActiveOrders()) {
+            return ['success' => false, 'msg' => 'Driver has reached the maximum of ' . delMaxActiveOrders() . ' active orders.'];
+        }
         $res = WorkflowService::transition($pdo, 'delivery', $orderId, 'assigned', [
             'extra' => ['delivery_staff_id' => $driverId, 'assigned_at' => date('Y-m-d H:i:s'), 'assigned_by' => $userId],
             'changed_by' => $userId,
@@ -71,6 +77,21 @@ class DeliveryService
         $driver = delGetDriverProfile($pdo, $driverId);
         if (!$driver) {
             return ['success' => false, 'msg' => 'Driver profile not found.'];
+        }
+        if (($driver['availability'] ?? '') === 'on_delivery') {
+            return ['success' => false, 'msg' => 'Driver is currently out for delivery and cannot receive new assignments.'];
+        }
+        $activeNow = delCountActiveOrders($pdo, $driverId);
+        $eligibleCount = 0;
+        foreach ($orderIds as $oid) {
+            $oid = (int) $oid;
+            $check = $pdo->prepare("SELECT id, delivery_staff_id FROM customer_orders WHERE id = ? AND status = 'approved' AND payment_confirmed = 1 AND fulfillment_method = 'delivery' AND fulfillment_status = 'ready_for_delivery'");
+            $check->execute([$oid]);
+            $o = $check->fetch();
+            if ($o && $o['delivery_staff_id'] === null) $eligibleCount++;
+        }
+        if ($activeNow + $eligibleCount > delMaxActiveOrders()) {
+            return ['success' => false, 'msg' => 'Driver would exceed the maximum of ' . delMaxActiveOrders() . ' active orders (currently ' . $activeNow . ').'];
         }
         $assigned = 0;
         $skipped = 0;

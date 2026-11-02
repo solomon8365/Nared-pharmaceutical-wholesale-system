@@ -81,7 +81,7 @@ if ($invId <= 0) {
                     <tr><td colspan="11" class="text-center py-4 text-muted">No invoices found.</td></tr>
                 <?php else: foreach ($invoices as $r):
                     $psClass = $r['payment_status'] === 'paid' ? 'paid' : ($r['payment_status'] === 'partial' ? 'partial' : 'unpaid');
-                    $dsLabels = ['assigned'=>'Assigned','out_for_delivery'=>'Out for Delivery','pod_pending'=>'Awaiting Verification','delivered'=>'Delivered'];
+                    $dsLabels = ['assigned'=>'Assigned','out_for_delivery'=>'Out for Delivery','pod_pending'=>'Awaiting Verification','delivered'=>'Delivered','ready_for_pickup'=>'Ready for Pickup'];
                 ?>
                 <tr>
                     <td><strong><?= htmlspecialchars($r['invoice_no']) ?></strong></td>
@@ -144,6 +144,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $messages[] = ['type' => $res['success'] ? 'success' : 'error', 'text' => $res['msg']];
         }
+    }
+
+    // --- Pickup confirmation (customer) ---
+    if (isset($_POST['confirm_pickup_invoice'])) {
+        $oid = (int) $chkInv['customer_order_id'];
+        $res = FulfillmentService::handOverForPickup($pdo, $oid, (int)($_SESSION['user']['id'] ?? 0), 'Customer (self)', $_POST['cust_signature_data'] ?? '');
+        $messages[] = ['type' => $res['success'] ? 'success' : 'error', 'text' => $res['msg']];
     }
 
     // --- Payment update ---
@@ -250,10 +257,20 @@ if (!$allowed) { header('HTTP/1.0 403 Forbidden'); echo '<h1>Access denied</h1>'
 $canEdit = hasPermission('finance_payments', 'view');
 
 // Delivery status refresh
-$stmt2 = $pdo->prepare("SELECT delivery_status, delivery_confirmed_at FROM customer_orders WHERE id = :oid");
+$stmt2 = $pdo->prepare("SELECT delivery_status, delivery_confirmed_at, fulfillment_method, fulfillment_status FROM customer_orders WHERE id = :oid");
 $stmt2->execute(['oid' => (int)$inv['customer_order_id']]);
 $co = $stmt2->fetch();
 $deliveryStatus = $co['delivery_status'] ?? $inv['delivery_status'];
+$fulfillmentMethod = $co['fulfillment_method'] ?? null;
+$fulfillmentStatus = $co['fulfillment_status'] ?? null;
+// Pickup orders: derive display status from fulfillment status.
+if ($fulfillmentMethod === 'pickup') {
+    if ($fulfillmentStatus === 'fulfillment_completed') {
+        $deliveryStatus = 'delivered';
+    } elseif ($fulfillmentStatus === 'waiting_customer_pickup') {
+        $deliveryStatus = 'ready_for_pickup';
+    }
+}
 $confirmedAt = $co['delivery_confirmed_at'] ?? $inv['delivery_confirmed_at'] ?? null;
 
 // Line items
@@ -550,11 +567,11 @@ $qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' . urle
                 <div class="mt-2">
                     <?php
                         $psClass = $paymentStatus === 'paid' ? 'paid' : ($paymentStatus === 'partial' ? 'partial' : 'unpaid');
-                    $dsLabels = ['assigned'=>'Assigned','out_for_delivery'=>'Out for Delivery','pod_pending'=>'Awaiting Verification','delivered'=>'Delivered'];
+                    $dsLabels = ['assigned'=>'Assigned','out_for_delivery'=>'Out for Delivery','pod_pending'=>'Awaiting Verification','delivered'=>'Delivered','ready_for_pickup'=>'Ready for Pickup'];
                     ?>
                     <span class="inv-badge <?= $psClass ?>"><?= ucfirst($paymentStatus) ?></span>
-                    <span class="inv-badge <?= $deliveryStatus === 'delivered' ? 'delivered' : ($deliveryStatus === 'out_for_delivery' ? 'out-for' : ($deliveryStatus === 'pod_pending' ? 'pending' : 'pending')) ?>">
-                        <i class="fas fa-<?= $deliveryStatus === 'delivered' ? 'check-circle' : ($deliveryStatus === 'out_for_delivery' ? 'truck' : ($deliveryStatus === 'pod_pending' ? 'clipboard-check' : 'clock')) ?>"></i>
+                    <span class="inv-badge <?= $deliveryStatus === 'delivered' ? 'delivered' : ($deliveryStatus === 'out_for_delivery' ? 'out-for' : ($deliveryStatus === 'ready_for_pickup' ? 'pending' : ($deliveryStatus === 'pod_pending' ? 'pending' : 'pending'))) ?>">
+                        <i class="fas fa-<?= $deliveryStatus === 'delivered' ? 'check-circle' : ($deliveryStatus === 'out_for_delivery' ? 'truck' : ($deliveryStatus === 'ready_for_pickup' ? 'store' : ($deliveryStatus === 'pod_pending' ? 'clipboard-check' : 'clock'))) ?>"></i>
                         <?= $dsLabels[$deliveryStatus] ?? 'Pending' ?>
                     </span>
                 </div>
@@ -751,6 +768,23 @@ $qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' . urle
                 </div>
             </div>
         </div>
+
+        <!-- ======================== PICKUP CONFIRMATION ======================== -->
+        <?php if (customerAccountCustomerId() !== null && $fulfillmentMethod === 'pickup' && $fulfillmentStatus === 'waiting_customer_pickup'): ?>
+        <div class="confirm-section mt-3 p-3 border rounded" style="background:#f0fdf4;border-color:#059669">
+            <h6 class="fw-bold" style="color:#047857"><i class="fas fa-store me-1"></i> Confirm Pickup</h6>
+            <p class="small text-muted mb-2">Your order is ready for pickup. Confirm that you have received all items.</p>
+            <form method="post">
+                <?= csrf_field() ?>
+                <input type="hidden" name="confirm_pickup_invoice" value="1">
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" name="agree_pickup" required id="agreePickup">
+                    <label class="form-check-label small" for="agreePickup">I confirm I have picked up all items listed in this invoice.</label>
+                </div>
+                <button type="submit" class="btn btn-success btn-sm"><i class="fas fa-check me-1"></i>Confirm Pickup</button>
+            </form>
+        </div>
+        <?php endif; ?>
 
         <!-- ======================== DELIVERY CONFIRMATION ======================== -->
         <?php if (customerAccountCustomerId() !== null && $deliveryStatus === 'out_for_delivery'): ?>

@@ -2,6 +2,14 @@
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/services/init.php';
 requireLogin();
+
+if (!canViewPurchaseOrder() && !hasPermission('purchase_returns', 'create') && !hasPermission('purchase_returns', 'view') && !isAdmin()) {
+    http_response_code(403);
+    header('Content-Type: application/json');
+    echo json_encode(['error' => 'Access denied']);
+    exit;
+}
+
 header('Content-Type: application/json');
 
 $poId = (int) ($_GET['po_id'] ?? 0);

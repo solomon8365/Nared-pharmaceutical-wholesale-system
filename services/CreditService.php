@@ -106,7 +106,7 @@ class CreditService
         if (!$res['success']) {
             throw new ServiceException($res['error']);
         }
-        $pdo->prepare('UPDATE customers SET credit_approved_by = :by, credit_approved_at = NOW() WHERE id = :id')
+        $pdo->prepare('UPDATE customers SET credit_approved_by = :by, credit_approved_at = NOW(), requested_credit_limit = 0 WHERE id = :id')
             ->execute(['by' => $userId, 'id' => $customerId]);
         AuditService::credit($pdo, $customerId, 'credit_approved', $old, StatusCatalog::CREDIT_APPROVED, $userId);
         NotificationService::credit($pdo, $customerId, 'success', 'Credit Approved', 'Your credit account has been approved.');
@@ -136,6 +136,8 @@ class CreditService
         if (!$res['success']) {
             throw new ServiceException($res['error']);
         }
+        $pdo->prepare('UPDATE customers SET requested_credit_limit = 0 WHERE id = :id')
+            ->execute(['id' => $customerId]);
         AuditService::credit($pdo, $customerId, 'credit_rejected', $old, StatusCatalog::CREDIT_REJECTED, $userId);
         NotificationService::credit($pdo, $customerId, 'error', 'Credit Rejected', 'Your credit application was rejected.');
     }
@@ -150,7 +152,7 @@ class CreditService
         if (!$res['success']) {
             throw new ServiceException($res['error']);
         }
-        $pdo->prepare('UPDATE customers SET credit_approved_by = :by, credit_approved_at = NOW() WHERE id = :id')
+        $pdo->prepare('UPDATE customers SET credit_approved_by = :by, credit_approved_at = NOW(), requested_credit_limit = 0 WHERE id = :id')
             ->execute(['by' => $userId, 'id' => $customerId]);
         AuditService::credit($pdo, $customerId, 'credit_resumed', $old, StatusCatalog::CREDIT_APPROVED, $userId);
         NotificationService::credit($pdo, $customerId, 'success', 'Credit Resumed', 'Your credit account is active again.');

@@ -143,8 +143,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     <label style="font-weight:600;font-size:.82rem">Assign to:</label>
                     <select id="bulk-driver-select">
                         <option value="">— Select Driver —</option>
-                        <?php foreach ($allDrivers as $d): ?>
-                            <option value="<?= (int)$d['id'] ?>"><?= htmlspecialchars($d['full_name']) ?> (<?= $d['availability'] ?>)</option>
+                        <?php foreach ($availableDrivers as $d): ?>
+                            <option value="<?= (int)$d['id'] ?>"><?= htmlspecialchars($d['full_name']) ?> (<?= delCountActiveOrders($pdo, (int)$d['id']) ?>/<?= delMaxActiveOrders() ?> active)</option>
                         <?php endforeach; ?>
                     </select>
                 </div>

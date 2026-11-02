@@ -400,8 +400,61 @@ class WorkflowService
         AuditService::delivery($pdo, $orderId, 'assigned', null, 'assigned', $uid, "Delivery staff #{$deliveryStaffId} assigned");
     }
 
+    /**
+     * Bulk-assign multiple approved, paid, ready-for-delivery orders to one driver.
+     * Runs in a single transaction; rolls back on any error.
+     * @return int number of orders assigned
+     */
+    public static function bulkAssignDelivery(PDO $pdo, array $orderIds, int $deliveryStaffId, int $uid): int
+    {
+        $orderIds = array_values(array_unique(array_filter(array_map('intval', $orderIds))));
+        if (empty($orderIds)) {
+            throw new ServiceException('No orders selected.');
+        }
+        if ($deliveryStaffId <= 0) {
+            throw new ServiceException('Please choose a delivery staff member.');
+        }
+        // verify driver exists & active
+        $drv = $pdo->prepare('SELECT id FROM driver_profiles WHERE id = :id AND status = "active"');
+        $drv->execute(['id' => $deliveryStaffId]);
+        if (!$drv->fetch()) {
+            throw new ServiceException('Selected driver is not available.');
+        }
+        $pdo->beginTransaction();
+        try {
+            $count = 0;
+            foreach ($orderIds as $orderId) {
+                $check = $pdo->prepare('SELECT status, payment_confirmed, delivery_staff_id, fulfillment_method, fulfillment_status FROM customer_orders WHERE id = :id');
+                $check->execute(['id' => $orderId]);
+                $co = $check->fetch();
+                if (!$co || $co['status'] !== 'approved' || !$co['payment_confirmed'] || $co['delivery_staff_id'] !== null
+                    || $co['fulfillment_method'] !== 'delivery' || $co['fulfillment_status'] !== 'ready_for_delivery') {
+                    throw new ServiceException("Order #{$orderId} is not eligible for assignment.");
+                }
+                $result = static::transition($pdo, 'delivery', $orderId, 'assigned', [
+                    'extra' => ['delivery_staff_id' => $deliveryStaffId],
+                    'changed_by' => $uid,
+                    'skip_transaction' => true,
+                ]);
+                if (!$result['success']) {
+                    throw new ServiceException("Order #{$orderId}: " . $result['error']);
+                }
+                AuditService::delivery($pdo, $orderId, 'assigned', null, 'assigned', $uid, "Bulk: delivery staff #{$deliveryStaffId} assigned");
+                $count++;
+            }
+            $pdo->commit();
+            return $count;
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $e instanceof ServiceException ? $e : new ServiceException('Bulk assignment failed: ' . $e->getMessage());
+        }
+    }
+
     public static function markOutForDelivery(PDO $pdo, int $orderId, int $uid): void
     {
+        require_once __DIR__ . '/../includes/delivery_helpers.php';
         $check = $pdo->prepare('SELECT id, delivery_status, delivery_staff_id FROM customer_orders WHERE id = :id');
         $check->execute(['id' => $orderId]);
         $co = $check->fetch();
@@ -414,6 +467,9 @@ class WorkflowService
         ]);
         if (!$result['success']) {
             throw new ServiceException($result['error']);
+        }
+        if (!empty($co['delivery_staff_id'])) {
+            delSyncDriverAvailability($pdo, (int) $co['delivery_staff_id']);
         }
     }
 

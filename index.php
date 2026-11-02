@@ -99,7 +99,9 @@ $allowedPages = [
     'store_dashboard',
     'products',
     'categories',
+    'categories_add',
     'suppliers',
+    'suppliers_add',
     'purchase_orders',
     'goods_receiving',
     'purchase_returns',
@@ -216,7 +218,7 @@ if (currentUser() && isDeliveryStaff() && $page !== 'lock' && !in_array($page, [
     header('Location: index.php?page=delivery_dashboard');
     exit;
 }
-if (currentUser() && isFinanceOfficer() && $page !== 'lock' && !in_array($page, ['finance_dashboard', 'finance_payments', 'finance_refunds', 'finance_reports', 'finance_bank', 'finance_cash', 'finance_expenses', 'finance_accounting', 'finance_charts', 'info', 'supplier_payments', 'purchase_payment_approval', 'purchase_orders', 'credit_management', 'credit_reports', 'customer_statement', 'sales', 'receipt', 'invoice', 'ledger'], true)) {
+if (currentUser() && isFinanceOfficer() && $page !== 'lock' && !in_array($page, ['finance_dashboard', 'finance_payments', 'finance_refunds', 'finance_reports', 'finance_bank', 'finance_cash', 'finance_expenses', 'finance_accounting', 'finance_charts', 'info', 'supplier_payments', 'purchase_payment_approval', 'purchase_orders', 'credit_management', 'credit_control', 'credit_reports', 'customer_statement', 'sales', 'receipt', 'invoice', 'ledger'], true)) {
     header('Location: index.php?page=finance_dashboard');
     exit;
 }
@@ -224,7 +226,7 @@ if (currentUser() && isSalesperson() && $page !== 'lock' && !in_array($page, ['d
     header('Location: index.php?page=sales');
     exit;
 }
-if (currentUser() && isStoreManager() && $page !== 'lock' && !in_array($page, ['store_dashboard', 'products', 'categories', 'stock', 'stock_movements', 'stock_adjustments', 'stock_transfers', 'physical_count', 'batch_expiry', 'expiry_alerts', 'expiry_management', 'out_of_stock_queue', 'suppliers', 'purchase_orders', 'goods_receiving', 'purchase_returns', 'sales', 'customers', 'customer_order_queue', 'order_fulfillment', 'warehouse_picking', 'invoice', 'warehouse_reports', 'dashboard', 'change_password', 'customer_settings', 'info', 'help_center', 'warehouse_inventory', '404'], true)) {
+if (currentUser() && isStoreManager() && $page !== 'lock' && !in_array($page, ['store_dashboard', 'products', 'categories', 'categories_add', 'stock', 'stock_movements', 'stock_adjustments', 'stock_transfers', 'physical_count', 'batch_expiry', 'expiry_alerts', 'expiry_management', 'out_of_stock_queue', 'suppliers', 'suppliers_add', 'purchase_orders', 'goods_receiving', 'purchase_returns', 'sales', 'customers', 'customer_order_queue', 'order_fulfillment', 'warehouse_picking', 'invoice', 'warehouse_reports', 'dashboard', 'change_password', 'customer_settings', 'info', 'help_center', 'warehouse_inventory', '404'], true)) {
     header('Location: index.php?page=store_dashboard');
     exit;
 }
@@ -247,7 +249,7 @@ if (currentUser() && in_array($page, ['delivery_staff','delivery_assign','delive
 // Dynamic permission guard for custom roles (and all non-admin roles)
 if (currentUser() && (!isAdmin() || getUserRoleId() !== 1) && !in_array($page, $publicPages, true) && !in_array($page, $standalonePages, true)) {
     $pageModule = $page;
-    if (in_array($pageModule, ['receipt', 'login', 'register', 'catalog', '404', 'dashboard', 'customer_settings', 'change_password', 'info', 'messages', 'place_order', 'my_orders', 'invoice', 'payments', 'help_center', 'credit_portal', 'credit_control', 'credit_reports', 'customer_statement', 'finance_dashboard', 'finance_payments', 'finance_refunds', 'finance_reports', 'finance_bank', 'finance_cash', 'finance_expenses', 'finance_accounting', 'finance_charts', 'delivery_dashboard', 'delivery_assign', 'delivery_tracking', 'delivery_confirm', 'delivery_history', 'delivery_returns', 'delivery_staff', 'assign_deliveries', 'delivery_confirmation', 'departments', 'login_history', 'audit_logs', 'tax_currency', 'warehouse_reports', 'warehouse_inventory', 'ledger'], true)) {
+    if (in_array($pageModule, ['receipt', 'login', 'register', 'catalog', '404', 'dashboard', 'customer_settings', 'change_password', 'info', 'messages', 'place_order', 'my_orders', 'invoice', 'payments', 'help_center', 'credit_portal', 'credit_control', 'credit_reports', 'customer_statement', 'finance_dashboard', 'finance_payments', 'finance_refunds', 'finance_reports', 'finance_bank', 'finance_cash', 'finance_expenses', 'finance_accounting', 'finance_charts', 'delivery_dashboard', 'delivery_assign', 'delivery_tracking', 'delivery_confirm', 'delivery_history', 'delivery_returns', 'delivery_staff', 'assign_deliveries', 'delivery_confirmation', 'departments', 'login_history', 'audit_logs', 'tax_currency', 'warehouse_reports', 'warehouse_inventory', 'ledger', 'categories_add', 'suppliers_add'], true)) {
         // Skip permission check for dashboard (redirect target) and public/standalone pages
     } elseif (!hasPermission($pageModule, 'view')) {
         // If user has a custom role without this page permission, redirect to dashboard

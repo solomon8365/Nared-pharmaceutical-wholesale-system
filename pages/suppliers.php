@@ -231,7 +231,32 @@ $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $orders = $stmt->fetchAll();
 ?>
-<style>@media(max-width:768px){.mob-grid-2{grid-template-columns:1fr!important}}</style>
+<style>
+@media(max-width:768px){.mob-grid-2{grid-template-columns:1fr!important}}
+.sup-page{max-width:1200px;margin:0 auto}
+.sup-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px}
+.sup-stat{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.sup-stat-val{font-size:1.4rem;font-weight:800;color:#0f172a}
+.sup-stat-label{font-size:.75rem;color:#64748b;margin-top:2px}
+.sup-card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.06);margin-bottom:16px}
+.sup-card h2{font-size:1rem;font-weight:700;color:#0f172a;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+.sup-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}
+.sup-table th{text-align:left;padding:10px 12px;background:#f8fafc;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+.sup-table td{padding:10px 12px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+.sup-table tbody tr:hover{background:#f8fafc}
+.sup-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:600}
+.sup-badge-active{background:#dcfce7;color:#166534}
+.sup-badge-inactive{background:#f1f5f9;color:#64748b}
+.sup-btn{padding:8px 14px;border:none;border-radius:8px;font-size:.82rem;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:6px;font-family:inherit;text-decoration:none}
+.sup-btn-primary{background:#2563eb;color:#fff}
+.sup-btn-outline{background:transparent;border:1px solid #cbd5e1;color:#475569}
+.sup-btn-danger{background:#dc2626;color:#fff}
+.sup-btn-sm{padding:4px 10px;font-size:.75rem}
+.sup-search{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.sup-search input{padding:8px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:.85rem;font-family:inherit;min-width:200px;flex:1}
+.sup-empty{text-align:center;padding:30px;color:#94a3b8}
+.sup-empty i{font-size:2rem;color:#cbd5e1;display:block;margin-bottom:8px}
+</style>
 <section>
     <h1>Suppliers</h1>
     <?php foreach ($messages as $message): ?>
@@ -244,71 +269,36 @@ $orders = $stmt->fetchAll();
     </div>
 
     <?php if ($tab === 'suppliers'): ?>
+    <?php
+    $totalSuppliers = count($suppliers);
+    $activeSuppliers = count(array_filter($suppliers, fn($s) => ($s['supplier_status'] ?? 'active') === 'active'));
+    $totalBalance = array_sum(array_map(fn($s) => (($supplierBalances[(int)$s['id']]['ordered'] ?? 0) - ($supplierBalances[(int)$s['id']]['paid'] ?? 0)), $suppliers));
+    ?>
+    <div class="sup-stats">
+        <div class="sup-stat"><div class="sup-stat-val"><?= $totalSuppliers ?></div><div class="sup-stat-label">Total Suppliers</div></div>
+        <div class="sup-stat"><div class="sup-stat-val"><?= $activeSuppliers ?></div><div class="sup-stat-label">Active Suppliers</div></div>
+        <div class="sup-stat"><div class="sup-stat-val"><?= count($orders) ?></div><div class="sup-stat-label">Purchase Orders</div></div>
+        <div class="sup-stat"><div class="sup-stat-val"><?= fmt($totalBalance) ?></div><div class="sup-stat-label">Outstanding Balance</div></div>
+    </div>
 
-    <?php if ($editSupplier && hasPermission('suppliers', 'edit')): ?>
-        <div class="panel" style="max-width:600px">
-            <h2>Edit supplier #<?= htmlspecialchars((string) $editSupplier['id']) ?></h2>
-            <form method="post" class="form-grid">
-                <?= csrf_field() ?>
-                <input type="hidden" name="_action" value="update">
-                <input type="hidden" name="supplier_id" value="<?= htmlspecialchars((string) $editSupplier['id']) ?>">
-                <div class="mob-grid-2" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-                    <label>Name<input type="text" name="name" value="<?= htmlspecialchars($editSupplier['name']) ?>" required></label>
-                    <label>Supplier Status
-                        <select name="supplier_status">
-                            <option value="active"<?= ($editSupplier['supplier_status'] ?? 'active') === 'active' ? ' selected' : '' ?>>Active</option>
-                            <option value="inactive"<?= ($editSupplier['supplier_status'] ?? '') === 'inactive' ? ' selected' : '' ?>>Inactive</option>
-                        </select>
-                    </label>
-                    <label>Contact Person<input type="text" name="contact" value="<?= htmlspecialchars((string) ($editSupplier['contact_person'] ?? '')) ?>"></label>
-                    <label>Phone<input type="text" name="phone" value="<?= htmlspecialchars((string) ($editSupplier['phone'] ?? '')) ?>"></label>
-                    <label>Email<input type="email" name="email" value="<?= htmlspecialchars($editSupplier['email'] ?? '') ?>"></label>
-                </div>
-                <label>Physical Address<textarea name="physical_address"><?= htmlspecialchars($editSupplier['physical_address'] ?? '') ?></textarea></label>
-                <div>
-                    <button type="submit">Update supplier</button>
-                    <a href="?page=suppliers" style="display:inline-block;padding:12px 20px;color:var(--brown-800);font-weight:700">Cancel</a>
-                </div>
-            </form>
-        </div>
-    <?php endif; ?>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px">
+        <h2 style="margin:0">Supplier List</h2>
+        <?php if (hasPermission('suppliers', 'create')): ?>
+            <a href="?page=suppliers_add" style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:#2563eb;color:#fff;border-radius:8px;font-weight:600;text-decoration:none;font-size:.85rem"><i class="fas fa-plus"></i> Add Supplier</a>
+        <?php endif; ?>
+    </div>
 
     <div class="panel split">
-        <div class="panel-block">
-            <?php if (hasPermission('suppliers', 'create')): ?>
-            <h2>Add Supplier</h2>
-            <form method="post" class="form-grid" style="max-width:500px">
-                <?= csrf_field() ?>
-                <input type="hidden" name="_action" value="create">
-                <div class="mob-grid-2" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-                    <label>Name<input type="text" name="name" required></label>
-                    <label>Status
-                        <select name="supplier_status">
-                            <option value="active">Active</option>
-                            <option value="inactive">Inactive</option>
-                        </select>
-                    </label>
-                    <label>Contact Person<input type="text" name="contact"></label>
-                    <label>Phone<input type="text" name="phone"></label>
-                    <label>Email<input type="email" name="email"></label>
-                </div>
-                <label>Physical Address<textarea name="physical_address"></textarea></label>
-                <button type="submit">Create Supplier</button>
-            </form>
-            <?php endif; ?>
-        </div>
-
-        <div class="panel-block">
-            <h2>Supplier List</h2>
-            <form method="get" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <div class="panel-block" style="flex:1">
+            <form method="get" class="sup-search">
                 <input type="hidden" name="page" value="suppliers">
                 <input type="hidden" name="tab" value="suppliers">
-                <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Search suppliers..." style="flex:1;margin:0">
-                <button type="submit" style="margin:0">Search</button>
-                <?php if ($search !== ''): ?><a href="?page=suppliers" style="display:inline-flex;align-items:center;padding:0 12px;color:var(--brown-800);font-weight:600">Clear</a><?php endif; ?>
+                <input type="text" name="search" value="<?= htmlspecialchars($search) ?>" placeholder="Search suppliers...">
+                <button type="submit" class="sup-btn sup-btn-primary sup-btn-sm"><i class="fas fa-search"></i> Search</button>
+                <?php if ($search !== ''): ?><a href="?page=suppliers" class="sup-btn sup-btn-outline sup-btn-sm">Clear</a><?php endif; ?>
             </form>
             <div style="overflow-x:auto">
-            <table>
+            <table class="sup-table">
                 <thead><tr><th>ID</th><th>Name</th><th>Contact</th><th>Phone</th><th>Email</th><th>Status</th><th>Balance</th><th>Actions</th></tr></thead>
                 <tbody>
                     <?php if (empty($suppliers)): ?>
@@ -327,18 +317,18 @@ $orders = $stmt->fetchAll();
                                 <td><?= htmlspecialchars((string) ($supplier['contact_person'] ?? '')) ?></td>
                                 <td><?= htmlspecialchars((string) ($supplier['phone'] ?? '')) ?></td>
                                 <td><?= htmlspecialchars($supplier['email'] ?? '—') ?></td>
-                                <td><?php $ss = $supplier['supplier_status'] ?? 'active'; $ssc = $ss === 'active' ? '#059669' : '#f59e0b'; ?><span style="display:inline-block;padding:2px 6px;border-radius:3px;font-size:0.72rem;font-weight:700;background:<?= $ssc ?>20;color:<?= $ssc ?>"><?= ucfirst($ss) ?></span></td>
+                                <td><span class="sup-badge <?= ($supplier['supplier_status'] ?? 'active') === 'active' ? 'sup-badge-active' : 'sup-badge-inactive' ?>"><?= ucfirst($supplier['supplier_status'] ?? 'active') ?></span></td>
                                 <td class="<?= $balance > 0 ? 'text-danger' : 'text-success' ?>" style="font-weight:700"><?= fmt($balance) ?></td>
                                 <td>
                                     <?php if (hasPermission('suppliers', 'edit')): ?>
-                                    <a href="?page=suppliers&edit=<?= htmlspecialchars((string) $sid) ?>" style="color:var(--brown-800);font-weight:700;text-decoration:none;margin-right:10px">Edit</a>
+                                    <a href="?page=suppliers_add&edit=<?= htmlspecialchars((string) $sid) ?>" class="sup-btn sup-btn-outline sup-btn-sm"><i class="fas fa-edit"></i> Edit</a>
                                     <?php endif; ?>
                                     <?php if (hasPermission('suppliers', 'delete')): ?>
                                     <form method="post" style="display:inline" onsubmit="return confirm('Delete this supplier?')">
                                         <?= csrf_field() ?>
                                         <input type="hidden" name="_action" value="delete">
                                         <input type="hidden" name="delete_id" value="<?= htmlspecialchars((string) $sid) ?>">
-                                        <button type="submit" class="btn-danger" style="padding:4px 10px;font-size:0.82rem">Delete</button>
+                                        <button type="submit" class="sup-btn sup-btn-danger sup-btn-sm"><i class="fas fa-trash"></i></button>
                                     </form>
                                     <?php endif; ?>
                                     <?php if (!empty($oList)): ?>

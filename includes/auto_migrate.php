@@ -1268,3 +1268,79 @@ function ensureCoreWorkflowTablesMigration(PDO $pdo): void
         }
     } catch (Exception $e) { /* never block the request */ }
 }
+
+/**
+ * Separation of duties for credit management:
+ * - Manager: authorizes and approves/rejects credit requests, raises/reduces limits, overrides.
+ * - Finance Officer: manages credit payments, monitors customer outstanding balances,
+ *   updates invoice payment due dates, and exports reports.
+ *   Finance Officer cannot approve credit limit requests.
+ */
+function ensureCreditManagementRoleSeparation(PDO $pdo): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+
+    try {
+        $find = $pdo->prepare('SELECT id, LOWER(TRIM(name)) AS rname FROM roles WHERE LOWER(TRIM(name)) IN ("finance officer", "manager")');
+        $find->execute();
+        $roles = [];
+        foreach ($find->fetchAll() as $r) {
+            $roles[$r['rname']] = (int) $r['id'];
+        }
+
+        $ins = $pdo->prepare('INSERT IGNORE INTO role_permissions (role_id, module, permission) VALUES (?, ?, ?)');
+        $changed = 0;
+
+        // Finance Officer (payments, outstanding balance, invoice due dates)
+        if (isset($roles['finance officer'])) {
+            $finId = $roles['finance officer'];
+            foreach ([
+                ['credit_management', 'view'],
+                ['credit_management', 'pay'],
+                ['credit_management', 'edit'],
+                ['credit_control', 'view'],
+                ['credit_control', 'pay'],
+                ['credit_control', 'edit'],
+                ['credit_reports', 'view'],
+                ['credit_reports', 'export'],
+            ] as [$mod, $perm]) {
+                $ins->execute([$finId, $mod, $perm]);
+                $changed += $ins->rowCount();
+            }
+            // Explicitly ensure Finance cannot approve credit requests or settings
+            $del = $pdo->prepare('DELETE FROM role_permissions WHERE role_id = ? AND module IN ("credit_management", "credit_control") AND permission IN ("approve", "delete")');
+            $del->execute([$finId]);
+            $changed += $del->rowCount();
+        }
+
+        // Manager (credit request approval, limits, overrides)
+        if (isset($roles['manager'])) {
+            $mgrId = $roles['manager'];
+            foreach ([
+                ['credit_management', 'view'],
+                ['credit_management', 'approve'],
+                ['credit_management', 'edit'],
+                ['credit_management', 'override'],
+                ['credit_management', 'pay'],
+                ['credit_control', 'view'],
+                ['credit_control', 'approve'],
+                ['credit_control', 'edit'],
+                ['credit_control', 'override'],
+                ['credit_control', 'pay'],
+                ['credit_reports', 'view'],
+                ['credit_reports', 'export'],
+            ] as [$mod, $perm]) {
+                $ins->execute([$mgrId, $mod, $perm]);
+                $changed += $ins->rowCount();
+            }
+        }
+
+        if ($changed > 0 && function_exists('bumpPermVersion')) {
+            bumpPermVersion();
+        }
+    } catch (Throwable $e) { /* idempotent migration */ }
+}

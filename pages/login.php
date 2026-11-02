@@ -22,6 +22,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $errors = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_csrf();
     $lockoutMsg = check_login_attempts();
     if ($lockoutMsg) {
         $errors[] = $lockoutMsg;

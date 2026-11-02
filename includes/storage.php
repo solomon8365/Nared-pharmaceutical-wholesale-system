@@ -155,6 +155,14 @@ function storage_put(string $tmpPath, string $area, string $filename, ?string $c
         return null;
     }
 
+    // Defense-in-depth: Never allow executable script extensions to be saved into storage
+    $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+    $blocked = ['php', 'phtml', 'phar', 'php3', 'php4', 'php5', 'php7', 'php8', 'phps', 'cgi', 'pl', 'py', 'exe', 'sh', 'bat', 'cmd', 'vbs', 'html', 'htm', 'js'];
+    if (in_array($ext, $blocked, true)) {
+        storage_log('Blocked attempt to store file with forbidden extension: ' . $filename);
+        return null;
+    }
+
     if ($contentType === null || $contentType === '') {
         $contentType = 'application/octet-stream';
         if (class_exists('finfo')) {
@@ -291,4 +299,68 @@ function storage_delete($ref): bool
         return true; // already gone
     }
     return @unlink($path);
+}
+
+/**
+ * Safely validate and store an uploaded file.
+ *
+ * @param array $file $_FILES['field']
+ * @param string $area Subfolder / prefix (e.g. 'receipts', 'refunds', 'payments')
+ * @param string $prefix Filename prefix
+ * @param array<string,string>|null $allowedMimes Map of MIME type => safe file extension
+ * @param int $maxBytes Maximum file size in bytes (defaults to 5 MB)
+ * @param string|null &$error Populated with error message on failure
+ * @return string|null Web path or remote URL on success, null on failure
+ */
+function storage_upload_validated(array $file, string $area, string $prefix, ?array $allowedMimes = null, int $maxBytes = 5242880, ?string &$error = null): ?string
+{
+    $error = null;
+    if (!isset($file['error']) || $file['error'] === UPLOAD_ERR_NO_FILE || empty($file['tmp_name'])) {
+        return null;
+    }
+    if ($file['error'] !== UPLOAD_ERR_OK) {
+        $error = 'File upload failed with error code ' . $file['error'];
+        return null;
+    }
+    $tmp = (string) $file['tmp_name'];
+    if (!is_uploaded_file($tmp)) {
+        $error = 'Invalid uploaded file.';
+        return null;
+    }
+    $size = (int) ($file['size'] ?? 0);
+    if ($size <= 0 || $size > $maxBytes) {
+        $error = 'File size exceeds maximum allowed limit (' . round($maxBytes / 1048576, 1) . ' MB).';
+        return null;
+    }
+
+    if ($allowedMimes === null) {
+        $allowedMimes = [
+            'image/jpeg' => 'jpg',
+            'image/png' => 'png',
+            'image/webp' => 'webp',
+            'image/gif' => 'gif',
+            'application/pdf' => 'pdf',
+        ];
+    }
+
+    $detectedMime = '';
+    if (class_exists('finfo')) {
+        $finfo = new finfo(FILEINFO_MIME_TYPE);
+        $detectedMime = (string) $finfo->file($tmp);
+    }
+    if (!isset($allowedMimes[$detectedMime])) {
+        $error = 'Invalid file type. Allowed formats: ' . implode(', ', array_unique(array_values($allowedMimes)));
+        return null;
+    }
+
+    $ext = $allowedMimes[$detectedMime];
+    $cleanPrefix = preg_replace('/[^a-zA-Z0-9_-]/', '_', $prefix);
+    $filename = $cleanPrefix . date('Ymd_His') . '_' . bin2hex(random_bytes(6)) . '.' . $ext;
+
+    $stored = storage_put($tmp, $area, $filename, $detectedMime);
+    if ($stored === null) {
+        $error = 'Failed to persist uploaded file to storage.';
+        return null;
+    }
+    return $stored;
 }

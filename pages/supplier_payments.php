@@ -13,22 +13,15 @@ $currencies = finCurrencies($pdo);
 
 requirePermission('supplier_payments', 'view');
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !isset($_SESSION['csrf_token'])) {
-    $csrf_token = bin2hex(random_bytes(32));
-    $_SESSION['csrf_token'] = $csrf_token;
-} else {
-    $csrf_token = $_SESSION['csrf_token'];
-}
+$csrf_token = csrf_token();
 
 $success = '';
 $error = '';
 $uid = $_SESSION['user']['id'] ?? null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $_SESSION['csrf_token']) {
-        $error = 'Invalid CSRF token.';
-    } else {
-        $action = $_POST['action'] ?? '';
+    require_csrf();
+    $action = $_POST['action'] ?? '';
 
         if ($action === 'record_payment') {
             requirePoCapability('payment');
@@ -270,15 +263,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $error = 'Payment method is required.';
                         } else {
                             if (!empty($_FILES['payment_receipt']['name'])) {
-                                $allowedTypes = ['application/pdf', 'image/jpeg', 'image/png'];
-                                if (!in_array($_FILES['payment_receipt']['type'], $allowedTypes)) {
-                                    $error = 'Receipt must be PDF, JPG, or PNG.';
-                                } elseif ($_FILES['payment_receipt']['size'] > 5 * 1024 * 1024) {
-                                    $error = 'Receipt file must be under 5MB.';
-                                } else {
-                                    $ext = strtolower(pathinfo($_FILES['payment_receipt']['name'], PATHINFO_EXTENSION));
-                                    $receiptName = 'payment_receipt_' . $order_id . '_' . time() . '.' . $ext;
-                                    $receiptPath = storage_put($_FILES['payment_receipt']['tmp_name'], '', $receiptName) ?? '';
+                                $upErr = null;
+                                $allowedMimes = ['application/pdf' => 'pdf', 'image/jpeg' => 'jpg', 'image/png' => 'png'];
+                                $receiptPath = storage_upload_validated($_FILES['payment_receipt'], 'receipts', 'sup_pay_' . $order_id . '_', $allowedMimes, 5 * 1024 * 1024, $upErr) ?? '';
+                                if ($upErr) {
+                                    $error = 'Receipt upload error: ' . $upErr;
                                 }
                             }
 
@@ -331,7 +320,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
-}
 
 $tab = $_GET['tab'] ?? 'unpaid';
 

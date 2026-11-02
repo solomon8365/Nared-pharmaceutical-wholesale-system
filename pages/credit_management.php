@@ -1,8 +1,11 @@
 <?php
 require_once __DIR__ . '/../includes/workflow_helpers.php';
 require_once __DIR__ . '/../includes/credit_helpers.php';
+require_once __DIR__ . '/../includes/auto_migrate.php';
 requirePermission('credit_management', 'view');
 $pdo = getPDO();
+creditEnsureRequestMigration($pdo);
+ensureCreditManagementRoleSeparation($pdo);
 $user = currentUser();
 $uid = (int) $user['id'];
 $messages = [];
@@ -68,8 +71,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cid = (int) ($_POST['customer_id'] ?? 0);
         if ($cid <= 0) {
             $messages[] = ['type' => 'error', 'text' => 'Invalid customer.'];
+        } elseif (!in_array(userRole(), ['manager', 'admin'], true)) {
+            $messages[] = ['type' => 'error', 'text' => 'Access Denied: Only Management (Manager / Admin) can approve credit requests. Finance staff manages credit payments and balances.'];
         } else {
             try {
+                // If a customer requested credit, apply the requested limit/terms.
+                $reqStmt = $pdo->prepare('SELECT requested_credit_limit, requested_credit_terms FROM customers WHERE id = :id');
+                $reqStmt->execute(['id' => $cid]);
+                $req = $reqStmt->fetch();
+                if ($req && (float) ($req['requested_credit_limit'] ?? 0) > 0) {
+                    creditSetLimit($pdo, $cid, (float) $req['requested_credit_limit']);
+                    if (!empty($req['requested_credit_terms'])) {
+                        $pdo->prepare('UPDATE customers SET credit_terms_days = :t, credit_period_days = :t WHERE id = :id')->execute(['t' => (int) $req['requested_credit_terms'], 'id' => $cid]);
+                    }
+                }
                 CreditService::approve($pdo, $cid, $uid);
                 redirect_with_flash($returnUrl, 'Credit approved for customer #' . $cid . '.');
             } catch (ServiceException $e) {
@@ -80,6 +95,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cid = (int) ($_POST['customer_id'] ?? 0);
         if ($cid <= 0) {
             $messages[] = ['type' => 'error', 'text' => 'Invalid customer.'];
+        } elseif (!in_array(userRole(), ['manager', 'admin'], true)) {
+            $messages[] = ['type' => 'error', 'text' => 'Access Denied: Only Management can suspend credit accounts.'];
         } else {
             try {
                 CreditService::suspend($pdo, $cid, $uid);
@@ -92,6 +109,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cid = (int) ($_POST['customer_id'] ?? 0);
         if ($cid <= 0) {
             $messages[] = ['type' => 'error', 'text' => 'Invalid customer.'];
+        } elseif (!in_array(userRole(), ['manager', 'admin'], true)) {
+            $messages[] = ['type' => 'error', 'text' => 'Access Denied: Only Management can reject credit requests.'];
         } else {
             try {
                 CreditService::reject($pdo, $cid, $uid);
@@ -104,6 +123,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cid = (int) ($_POST['customer_id'] ?? 0);
         if ($cid <= 0) {
             $messages[] = ['type' => 'error', 'text' => 'Invalid customer.'];
+        } elseif (!in_array(userRole(), ['manager', 'admin'], true)) {
+            $messages[] = ['type' => 'error', 'text' => 'Access Denied: Only Management can resume credit accounts.'];
         } else {
             try {
                 CreditService::resume($pdo, $cid, $uid);
@@ -204,7 +225,7 @@ $totalUsed = (float) $pdo->query("SELECT COALESCE(SUM(credit_used), 0) FROM cust
 $totalLimits = (float) $pdo->query("SELECT COALESCE(SUM(credit_limit), 0) FROM customers WHERE credit_limit > 0")->fetchColumn();
 $creditUtilization = $totalLimits > 0 ? round(($totalUsed / $totalLimits) * 100, 1) : 0;
 $collectionRate = $totalCreditSales > 0 ? round((($totalCreditSales - $totalOutstanding) / $totalCreditSales) * 100, 1) : 0;
-$pendingApprovalCount = (int) $pdo->query("SELECT COUNT(*) FROM customers WHERE credit_approval_status = 'pending' AND credit_limit > 0")->fetchColumn();
+$pendingApprovalCount = (int) $pdo->query("SELECT COUNT(*) FROM customers WHERE credit_approval_status = 'pending' AND (credit_limit > 0 OR requested_credit_limit > 0)")->fetchColumn();
 
 $filterStatus = $_GET['status'] ?? 'all';
 $searchName = trim($_GET['search'] ?? '');
@@ -251,7 +272,7 @@ foreach ($allCustomers as $c) {
 
 $paymentsList = $pdo->query('SELECT cp.*, c.name AS customer_name, u.username AS recorded_by FROM customer_credit_payments cp JOIN customers c ON cp.customer_id = c.id LEFT JOIN users u ON cp.created_by = u.id ORDER BY cp.created_at DESC LIMIT 200')->fetchAll();
 
-$pendingApprovals = $pdo->query("SELECT id, name, customer_type, credit_limit, credit_used, credit_score, credit_terms_days, created_at FROM customers WHERE credit_approval_status = 'pending' AND credit_limit > 0 ORDER BY name")->fetchAll();
+$pendingApprovals = $pdo->query("SELECT id, name, customer_type, credit_limit, requested_credit_limit, requested_credit_terms, credit_request_notes, credit_requested_at, credit_used, credit_score, credit_terms_days, created_at FROM customers WHERE credit_approval_status = 'pending' AND (credit_limit > 0 OR requested_credit_limit > 0) ORDER BY COALESCE(credit_requested_at, created_at) DESC")->fetchAll();
 
 $outstandingInvoices = $pdo->query("SELECT i.*, c.name AS customer_name FROM invoices i JOIN customers c ON i.customer_id = c.id WHERE i.payment_status IN ('unpaid','partial') AND i.outstanding_balance > 0 ORDER BY i.credit_due_date ASC")->fetchAll();
 
@@ -620,7 +641,9 @@ foreach ($upcomingCollections as $uc) {
                                         <td><span style="color:<?= $invOverdue?'#dc2626':'#475569' ?>;font-weight:<?= $invOverdue?'700':'400' ?>"><?= htmlspecialchars($inv['credit_due_date'] ?? '—') ?></span></td>
                                         <td onclick="event.stopPropagation()" style="white-space:nowrap">
                                             <form method="post" style="display:inline-flex;gap:4px;align-items:center"><?= csrf_field() ?><input type="hidden" name="_action" value="edit_due_date"><input type="hidden" name="customer_id" value="<?= $c['id'] ?>"><input type="hidden" name="invoice_id" value="<?= $inv['id'] ?>"><input type="date" name="new_due_date" value="<?= htmlspecialchars($inv['credit_due_date']??date('Y-m-d')) ?>" style="padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:.75rem;width:110px" onclick="event.stopPropagation()"><button type="submit" class="cr-btn cr-btn-outline cr-btn-sm" style="padding:3px 8px;font-size:.7rem" onclick="event.stopPropagation()"><i class="fas fa-save"></i></button></form>
+                                            <?php if (hasPermission('credit_management', 'delete')): ?>
                                             <form method="post" style="display:inline;margin-left:4px" onsubmit="return confirm('Write off <?= fmt((float)$inv['outstanding_balance']) ?>?')"><?= csrf_field() ?><input type="hidden" name="_action" value="write_off"><input type="hidden" name="customer_id" value="<?= $c['id'] ?>"><input type="hidden" name="invoice_id" value="<?= $inv['id'] ?>"><input type="hidden" name="write_off_amount" value="<?= (float)$inv['outstanding_balance'] ?>"><input type="hidden" name="write_off_reason" value="Credit write-off"><button type="submit" class="cr-btn cr-btn-red cr-btn-sm" style="padding:3px 8px;font-size:.7rem" onclick="event.stopPropagation()"><i class="fas fa-times-circle"></i></button></form>
+                                            <?php endif; ?>
                                         </td>
                                     </tr><?php endforeach; ?></tbody>
                                 </table>
@@ -674,7 +697,9 @@ foreach ($upcomingCollections as $uc) {
                             <td><?php if ($invIsOverdue): ?><span class="cr-badge cr-badge-red"><?= $invDaysOver ?> days</span><?php else: ?><span style="color:#94a3b8">—</span><?php endif; ?></td>
                             <td onclick="event.stopPropagation()" style="white-space:nowrap">
                                 <form method="post" style="display:inline-flex;gap:4px;align-items:center"><?= csrf_field() ?><input type="hidden" name="_action" value="edit_due_date"><input type="hidden" name="customer_id" value="<?= $inv['customer_id'] ?>"><input type="hidden" name="invoice_id" value="<?= $inv['id'] ?>"><input type="date" name="new_due_date" value="<?= htmlspecialchars($inv['credit_due_date']??date('Y-m-d')) ?>" style="padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:.75rem;width:110px" onclick="event.stopPropagation()"><button type="submit" class="cr-btn cr-btn-outline cr-btn-sm" style="padding:3px 8px;font-size:.7rem" onclick="event.stopPropagation()"><i class="fas fa-save"></i></button></form>
+                                <?php if (hasPermission('credit_management', 'delete')): ?>
                                 <form method="post" style="display:inline;margin-left:4px" onsubmit="return confirm('Write off <?= fmt($invOs) ?>?')"><?= csrf_field() ?><input type="hidden" name="_action" value="write_off"><input type="hidden" name="customer_id" value="<?= $inv['customer_id'] ?>"><input type="hidden" name="invoice_id" value="<?= $inv['id'] ?>"><input type="hidden" name="write_off_amount" value="<?= $invOs ?>"><input type="hidden" name="write_off_reason" value="Credit write-off"><button type="submit" class="cr-btn cr-btn-red cr-btn-sm" style="padding:3px 8px;font-size:.7rem"><i class="fas fa-times-circle"></i></button></form>
+                                <?php endif; ?>
                             </td>
                         </tr>
                     <?php endforeach; ?>
@@ -838,29 +863,61 @@ foreach ($upcomingCollections as $uc) {
 
     <!-- ════════════ CREDIT APPROVALS ════════════ -->
     <div id="cr-tab-approvals" class="cr-panel <?= $activeTab === 'approvals' ? 'active' : '' ?>">
+        <?php $canApproveCredit = in_array(userRole(), ['manager', 'admin'], true) && hasPermission('credit_management', 'approve'); ?>
         <div class="cr-card" style="border-top-left-radius:0;border-top-right-radius:0">
             <div class="cr-card-header"><i class="fas fa-check-double" style="color:#7c3aed"></i> Credit Approval Requests <?= $pendingApprovalCount > 0 ? '<span class="cr-badge cr-badge-orange">'.$pendingApprovalCount.' pending</span>' : '' ?></div>
+            <?php if (!$canApproveCredit): ?>
+                <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:10px">
+                    <i class="fas fa-info-circle" style="color:#2563eb;font-size:1.2rem"></i>
+                    <div style="font-size:0.875rem;color:#1e40af">
+                        <strong>Credit Approval Authority:</strong> Credit requests and limit increases are authorized exclusively by <strong>Management</strong>. Finance staff monitors credit usage, updates payment due dates, and records customer payments.
+                    </div>
+                </div>
+            <?php endif; ?>
             <?php if (empty($pendingApprovals)): ?>
                 <div class="cr-empty"><i class="fas fa-check-circle" style="color:#059669"></i>No pending approval requests</div>
             <?php else: ?>
             <div style="overflow-x:auto">
             <table class="cr-table">
-                <thead><tr><th>Customer</th><th>Type</th><th>Requested Limit</th><th>Current Used</th><th>Score</th><th>Terms</th><th>Registered</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Customer</th><th>Type</th><th>Requested Limit</th><th>Current Used</th><th>Score</th><th>Terms</th><th>Customer Note</th><th>Requested</th><th>Actions</th></tr></thead>
                 <tbody>
                     <?php foreach ($pendingApprovals as $pa):
-                        $paLimit = (float) $pa['credit_limit']; $paUsed = (float) $pa['credit_used']; $paScore = (int) $pa['credit_score'];
+                        $reqLimit = (float) ($pa['requested_credit_limit'] ?? 0);
+                        $paLimit = $reqLimit > 0 ? $reqLimit : (float) $pa['credit_limit'];
+                        $paTerms = !empty($pa['requested_credit_terms']) ? (int) $pa['requested_credit_terms'] : (int) $pa['credit_terms_days'];
+                        $paUsed = (float) $pa['credit_used'];
+                        $paScore = (int) $pa['credit_score'];
+                        $reqDate = !empty($pa['credit_requested_at']) ? $pa['credit_requested_at'] : ($pa['created_at'] ?? '—');
                     ?>
                         <tr>
-                            <td style="font-weight:600;color:#0f172a"><?= htmlspecialchars($pa['name']) ?></td>
+                            <td style="font-weight:600;color:#0f172a">
+                                <?= htmlspecialchars($pa['name']) ?>
+                                <?php if ($reqLimit > 0 && (float) $pa['credit_limit'] > 0): ?>
+                                    <div style="font-size:0.75rem;color:#64748b;font-weight:normal">Current limit: <?= fmt($pa['credit_limit']) ?></div>
+                                <?php endif; ?>
+                            </td>
                             <td><?= htmlspecialchars($pa['customer_type'] ?? '—') ?></td>
-                            <td style="font-weight:600"><?= fmt($paLimit) ?></td>
+                            <td style="font-weight:600;color:#2563eb"><?= fmt($paLimit) ?></td>
                             <td style="color:#d97706"><?= fmt($paUsed) ?></td>
                             <td><span style="font-weight:700;color:<?= $paScore>=650?'#059669':($paScore>=500?'#d97706':'#ea580c') ?>"><?= $paScore ?></span></td>
-                            <td><?= (int) $pa['credit_terms_days'] ?> days</td>
-                            <td style="font-size:.8rem;color:#64748b"><?= htmlspecialchars($pa['created_at'] ?? '—') ?></td>
+                            <td><?= $paTerms ?> days</td>
+                            <td style="max-width:240px">
+                                <?php if (!empty($pa['credit_request_notes'])): ?>
+                                    <div style="background:#f1f5f9;border-left:3px solid #3b82f6;padding:4px 8px;border-radius:4px;font-size:0.8rem;color:#334155;white-space:normal;word-break:break-word">
+                                        <i class="fas fa-comment-alt" style="color:#3b82f6;margin-right:4px"></i><?= htmlspecialchars($pa['credit_request_notes']) ?>
+                                    </div>
+                                <?php else: ?>
+                                    <span style="color:#94a3b8;font-size:0.8rem">—</span>
+                                <?php endif; ?>
+                            </td>
+                            <td style="font-size:.8rem;color:#64748b;white-space:nowrap"><?= htmlspecialchars($reqDate) ?></td>
                             <td onclick="event.stopPropagation()" style="white-space:nowrap">
-                                <form method="post" style="display:inline" onsubmit="return confirm('Approve credit for <?= htmlspecialchars($pa['name']) ?>?')"><?= csrf_field() ?><input type="hidden" name="_action" value="approve_credit"><input type="hidden" name="customer_id" value="<?= $pa['id'] ?>"><button type="submit" class="cr-btn cr-btn-green cr-btn-sm"><i class="fas fa-check"></i> Approve</button></form>
-                                <form method="post" style="display:inline;margin-left:4px" onsubmit="return confirm('Reject credit for <?= htmlspecialchars($pa['name']) ?>?')"><?= csrf_field() ?><input type="hidden" name="_action" value="reject_credit"><input type="hidden" name="customer_id" value="<?= $pa['id'] ?>"><button type="submit" class="cr-btn cr-btn-red cr-btn-sm"><i class="fas fa-times"></i> Reject</button></form>
+                                <?php if ($canApproveCredit): ?>
+                                    <form method="post" style="display:inline" onsubmit="return confirm('Approve credit for <?= htmlspecialchars($pa['name'], ENT_QUOTES) ?>?')"><?= csrf_field() ?><input type="hidden" name="_action" value="approve_credit"><input type="hidden" name="customer_id" value="<?= $pa['id'] ?>"><button type="submit" class="cr-btn cr-btn-green cr-btn-sm"><i class="fas fa-check"></i> Approve</button></form>
+                                    <form method="post" style="display:inline;margin-left:4px" onsubmit="return confirm('Reject credit for <?= htmlspecialchars($pa['name'], ENT_QUOTES) ?>?')"><?= csrf_field() ?><input type="hidden" name="_action" value="reject_credit"><input type="hidden" name="customer_id" value="<?= $pa['id'] ?>"><button type="submit" class="cr-btn cr-btn-red cr-btn-sm"><i class="fas fa-times"></i> Reject</button></form>
+                                <?php else: ?>
+                                    <span class="cr-badge cr-badge-orange" title="Requires Manager Approval"><i class="fas fa-user-tie"></i> Pending Manager</span>
+                                <?php endif; ?>
                             </td>
                         </tr>
                     <?php endforeach; ?>

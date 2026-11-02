@@ -20,9 +20,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $receiptPath = '';
             if (!empty($_FILES['receipt']['tmp_name'])) {
-                $ext = pathinfo($_FILES['receipt']['name'], PATHINFO_EXTENSION);
-                $receiptName = date('Ymd_His') . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
-                $receiptPath = storage_put($_FILES['receipt']['tmp_name'], 'receipts', $receiptName) ?? '';
+                $upErr = null;
+                $receiptPath = storage_upload_validated($_FILES['receipt'], 'receipts', 'exp_', null, 5242880, $upErr) ?? '';
+                if ($upErr) {
+                    $messages[] = ['type' => 'error', 'text' => 'Receipt upload error: ' . $upErr];
+                }
             }
             $uid = $_SESSION['user']['id'] ?? null;
             $pdo->prepare('INSERT INTO expenses (expense_category, amount, description, expense_date, payment_method, receipt_path, created_by, approval_status) VALUES (:cat, :amt, :desc, :dt, :pm, :rp, :uid, "approved")')->execute(['cat' => $cat, 'amt' => $amount, 'desc' => $desc, 'dt' => $date, 'pm' => $method, 'rp' => $receiptPath, 'uid' => $uid]);

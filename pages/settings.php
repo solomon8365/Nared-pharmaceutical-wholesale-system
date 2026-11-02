@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 requirePermission('settings', 'view');
 $pdo = getPDO();
 $messages = [];
@@ -92,11 +92,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'save_general') {
         saveKeys($pdo, $upsert, ['company_name','company_address','company_phone','company_email','website_url','currency','timezone','language'], $errors);
         if (!empty($_FILES['company_logo']['tmp_name'])) {
-            $ext = pathinfo($_FILES['company_logo']['name'], PATHINFO_EXTENSION);
-            $logoName = 'logo_' . time() . '.' . $ext;
-            $logoStored = storage_put($_FILES['company_logo']['tmp_name'], '', $logoName);
+            $upErr = null;
+            $imgMimes = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'image/gif' => 'gif'];
+            $logoStored = storage_upload_validated($_FILES['company_logo'], '', 'logo_', $imgMimes, 2097152, $upErr);
             if ($logoStored !== null) {
                 $upsert->execute(['k' => 'company_logo', 'v' => $logoStored, 'v2' => $logoStored]);
+            } elseif ($upErr) {
+                $errors[] = 'Company logo error: ' . $upErr;
             }
         }
         doSave($messages, $errors, $upsert);

@@ -199,21 +199,48 @@ function delGetDriverProfile(PDO $pdo, int $driverId): ?array {
     return $stmt->fetch() ?: null;
 }
 
-function delSyncDriverAvailability(PDO $pdo, int $driverId): void {
-    if ($driverId <= 0) return;
+function delMaxActiveOrders(): int {
+    $v = (int) get_setting('max_active_deliveries', '5');
+    return $v > 0 ? $v : 5;
+}
+
+function delCountActiveOrders(PDO $pdo, int $driverId): int {
+    if ($driverId <= 0) return 0;
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM customer_orders WHERE delivery_staff_id = ? AND delivery_status IN ('assigned','accepted','picked_up','out_for_delivery')");
     $stmt->execute([$driverId]);
-    $active = (int) $stmt->fetchColumn();
-    if ($active > 0) {
+    return (int) $stmt->fetchColumn();
+}
+
+function delSyncDriverAvailability(PDO $pdo, int $driverId): void {
+    if ($driverId <= 0) return;
+    $activeStmt = $pdo->prepare("SELECT COUNT(*) FROM customer_orders WHERE delivery_staff_id = ? AND delivery_status IN ('assigned','accepted','picked_up','out_for_delivery')");
+    $activeStmt->execute([$driverId]);
+    $active = (int) $activeStmt->fetchColumn();
+    $outStmt = $pdo->prepare("SELECT COUNT(*) FROM customer_orders WHERE delivery_staff_id = ? AND delivery_status = 'out_for_delivery'");
+    $outStmt->execute([$driverId]);
+    $outCount = (int) $outStmt->fetchColumn();
+    if ($outCount > 0) {
+        // Driver has started delivery: exclude from new assignments.
         $pdo->prepare("UPDATE driver_profiles SET availability = 'on_delivery' WHERE id = ?")->execute([$driverId]);
+    } elseif ($active === 0) {
+        // No active orders: mark available again (if previously on_delivery).
+        $pdo->prepare("UPDATE driver_profiles SET availability = 'available' WHERE id = ? AND availability = 'on_delivery'")->execute([$driverId]);
     } else {
+        // Active assigned orders but none out for delivery: keep available for more (within capacity).
         $pdo->prepare("UPDATE driver_profiles SET availability = 'available' WHERE id = ? AND availability = 'on_delivery'")->execute([$driverId]);
     }
 }
 
 function delGetAvailableDrivers(PDO $pdo): array {
-    $stmt = $pdo->query("SELECT id, full_name, phone, vehicle_type, vehicle_plate, availability, rating, successful_deliveries, status FROM driver_profiles WHERE status = 'active' AND availability = 'available' ORDER BY rating DESC, successful_deliveries DESC");
-    return $stmt->fetchAll();
+    $max = delMaxActiveOrders();
+    $stmt = $pdo->query("SELECT id, full_name, phone, vehicle_type, vehicle_plate, availability, rating, successful_deliveries, status FROM driver_profiles WHERE status = 'active' AND availability IN ('available','busy') ORDER BY rating DESC, successful_deliveries DESC");
+    $rows = $stmt->fetchAll();
+    $result = [];
+    foreach ($rows as $r) {
+        if (delCountActiveOrders($pdo, (int) $r['id']) >= $max) continue;
+        $result[] = $r;
+    }
+    return $result;
 }
 
 function delGetAllDrivers(PDO $pdo): array {

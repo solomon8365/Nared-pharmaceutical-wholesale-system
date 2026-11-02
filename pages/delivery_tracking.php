@@ -37,7 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             case 'mark_out_for_delivery':
                 if (WorkflowEngine::canTransition('delivery', $oldStatus, 'out_for_delivery')) {
                     $result = WorkflowEngine::transition($pdo, 'delivery', $orderId, 'out_for_delivery', ['extra' => ['dispatch_time' => date('Y-m-d H:i:s')], 'changed_by' => $userId, 'notes' => 'Delivery staff dispatched order']);
-                    if ($result['success']) { delLog($pdo, $orderId, 'status_change', $oldStatus, 'out_for_delivery', $userId, 'Dispatched by delivery staff'); redirect_with_flash($returnUrl, "Order #{$orderId} marked as out for delivery."); }
+                    if ($result['success']) { delLog($pdo, $orderId, 'status_change', $oldStatus, 'out_for_delivery', $userId, 'Dispatched by delivery staff'); if (!empty($order['delivery_staff_id'])) { delSyncDriverAvailability($pdo, (int) $order['delivery_staff_id']); } redirect_with_flash($returnUrl, "Order #{$orderId} marked as out for delivery."); }
                     else { $messages[] = ['type' => 'error', 'text' => $result['error']]; }
                 } else { $messages[] = ['type' => 'error', 'text' => 'Order cannot be dispatched from its current status.']; }
                 break;

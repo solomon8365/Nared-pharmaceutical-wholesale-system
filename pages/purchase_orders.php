@@ -156,7 +156,29 @@ $orders = $pdo->prepare($sql);
 $orders->execute($params);
 $orders = $orders->fetchAll();
 ?>
-<section>
+<style>
+.po-page{max-width:1300px;margin:0 auto}
+.po-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
+.po-stat{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.po-stat-val{font-size:1.3rem;font-weight:800;color:#0f172a}
+.po-stat-label{font-size:.72rem;color:#64748b;margin-top:2px}
+.po-card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.06);margin-bottom:16px}
+.po-card h2{font-size:1rem;font-weight:700;color:#0f172a;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+.po-table{width:100%;border-collapse:separate;border-spacing:0;font-size:.84rem}
+.po-table th{text-align:left;padding:10px 12px;background:#f8fafc;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+.po-table td{padding:10px 12px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+.po-table tbody tr:hover{background:#f8fafc}
+.po-badge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:600}
+.po-btn{padding:6px 12px;border:none;border-radius:8px;font-size:.78rem;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;font-family:inherit;text-decoration:none}
+.po-btn-primary{background:#2563eb;color:#fff}
+.po-btn-success{background:#059669;color:#fff}
+.po-btn-danger{background:#dc2626;color:#fff}
+.po-btn-outline{background:transparent;border:1px solid #cbd5e1;color:#475569}
+.po-btn-sm{padding:3px 8px;font-size:.75rem}
+.po-search{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.po-search select,.po-search input{padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:.85rem;font-family:inherit}
+</style>
+<section class="po-page">
     <h1>Purchase Orders</h1>
     <?php foreach ($messages as $m): ?>
         <div class="alert alert-<?= htmlspecialchars($m['type']) ?>"><?= htmlspecialchars($m['text']) ?></div>
@@ -282,6 +304,18 @@ $orders = $orders->fetchAll();
             </div>
         <?php endif; ?>
     <?php else: ?>
+    <?php
+    $poTotal = count($orders);
+    $poPending = count(array_filter($orders, fn($o) => $o['status'] === 'pending'));
+    $poReceived = count(array_filter($orders, fn($o) => $o['status'] === 'received'));
+    $poValue = array_sum(array_column($orders, 'total_amount'));
+    ?>
+    <div class="po-stats">
+        <div class="po-stat"><div class="po-stat-val"><?= $poTotal ?></div><div class="po-stat-label">Total Orders</div></div>
+        <div class="po-stat"><div class="po-stat-val"><?= $poPending ?></div><div class="po-stat-label">Pending</div></div>
+        <div class="po-stat"><div class="po-stat-val"><?= $poReceived ?></div><div class="po-stat-label">Received</div></div>
+        <div class="po-stat"><div class="po-stat-val"><?= fmt($poValue) ?></div><div class="po-stat-label">Total Value</div></div>
+    </div>
 
     <div class="tab-bar">
         <?php if (canCreatePurchaseOrder()): ?>
@@ -356,9 +390,9 @@ $orders = $orders->fetchAll();
         <div id="po-list" class="tab-panel">
             <div class="panel">
                 <h2>Purchase Order History</h2>
-                <form method="get" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
+                <form method="get" class="po-search">
                     <input type="hidden" name="page" value="purchase_orders">
-                    <select name="status" style="min-width:130px;margin:0">
+                    <select name="status" style="min-width:130px">
                         <option value="">All Statuses</option>
                         <?php foreach (['pending' => 'Pending','payment_pending' => 'Awaiting Finance','payment_approved' => 'Payment Approved','payment_rejected' => 'Payment Rejected','received' => 'Received','cancelled' => 'Cancelled'] as $v => $l): ?>
                             <option value="<?= $v ?>"<?= $filterStatus === $v ? ' selected' : '' ?>><?= $l ?></option>
@@ -374,7 +408,7 @@ $orders = $orders->fetchAll();
                     <?php if ($filterStatus !== '' || $filterSupplier > 0): ?><a href="?page=purchase_orders" style="display:inline-flex;align-items:center;padding:0 12px;color:var(--brown-800);font-weight:600">Clear</a><?php endif; ?>
                 </form>
                 <div style="overflow-x:auto">
-                <table>
+                <table class="po-table">
                     <thead><tr><th>PO#</th><th>Date</th><th>Supplier</th><th>Total</th><th>Status</th><th>Notes</th><th>Actions</th></tr></thead>
                     <tbody>
                         <?php if (empty($orders)): ?>

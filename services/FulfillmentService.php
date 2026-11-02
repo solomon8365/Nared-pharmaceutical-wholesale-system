@@ -94,9 +94,21 @@ class FulfillmentService
      *
      * @return array{rows:array<int,array>, short:int, supply:int}
      */
-    public static function fefoPlan(PDO $pdo, int $productId, int $needQty): array
+    public static function fefoPlan(PDO $pdo, int $productId, int $needQty, int $orderId = 0): array
     {
         $needQty = max((int) $needQty, 0);
+
+        // An approved order already had its stock committed and deducted from batches
+        // at approval time (deduct_from_batches).
+        $isApprovedOrder = false;
+        if ($orderId > 0) {
+            $stCheck = $pdo->prepare("SELECT status FROM customer_orders WHERE id = :id");
+            $stCheck->execute(['id' => $orderId]);
+            $ordStatus = (string) $stCheck->fetchColumn();
+            $isApprovedOrder = in_array($ordStatus, ['approved', 'completed', 'delivered'], true);
+        }
+
+        $qtyCondition = $isApprovedOrder ? "pb.quantity >= 0" : "pb.quantity > 0";
         $stmt = $pdo->prepare("
             SELECT pb.id AS batch_id, pb.warehouse_id, pb.batch_number, pb.expiry_date,
                    pb.quantity AS batch_qty,
@@ -105,12 +117,24 @@ class FulfillmentService
             LEFT JOIN warehouses w ON w.id = pb.warehouse_id
             WHERE pb.product_id = :pid
               AND pb.status = 'active'
-              AND pb.quantity > 0
+              AND {$qtyCondition}
               AND (pb.expiry_date IS NULL OR pb.expiry_date >= CURDATE())
             ORDER BY (pb.expiry_date IS NULL) ASC, pb.expiry_date ASC, pb.id ASC
         ");
         $stmt->execute(['pid' => $productId]);
         $batches = $stmt->fetchAll();
+
+        // For an approved order, restore the committed quantity into the active batches
+        // so the order can claim the units reserved for it.
+        if ($isApprovedOrder && !empty($batches)) {
+            $committedToCredit = $needQty;
+            foreach ($batches as &$b) {
+                if ($committedToCredit <= 0) break;
+                $b['batch_qty'] = (int) $b['batch_qty'] + $committedToCredit;
+                $committedToCredit = 0;
+            }
+            unset($b);
+        }
 
         // A product with NO batch rows at all is a legacy non-batch-tracked item.
         // Its sellable stock lives in products.stock_quantity (the path used by
@@ -122,6 +146,9 @@ class FulfillmentService
             $pStmt->execute(['id' => $productId]);
             $fallbackStock = (int) $pStmt->fetchColumn();
             $fallbackStock = max($fallbackStock, 0);
+            if ($isApprovedOrder) {
+                $fallbackStock += $needQty;
+            }
             $supply = $fallbackStock;
             $pick = min($fallbackStock, $needQty);
             $rows = $pick > 0 ? [[
@@ -195,7 +222,7 @@ class FulfillmentService
         $lines = $stmt->fetchAll();
         $plans = [];
         foreach ($lines as $line) {
-            $plan = static::fefoPlan($pdo, (int) $line['product_id'], (int) $line['ordered_qty']);
+            $plan = static::fefoPlan($pdo, (int) $line['product_id'], (int) $line['ordered_qty'], $orderId);
             $plans[(int) $line['product_id']] = [
                 'product_id' => (int) $line['product_id'],
                 'product_name' => $line['product_name'],

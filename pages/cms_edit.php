@@ -91,11 +91,28 @@ function logPageAction(PDO $pdo, int $pageId, string $action, ?int $userId, stri
 
 function handleFileUpload(array $file, string $uploadDir, string $prefix, array $allowed): ?string
 {
+    if (!isset($file['error']) || $file['error'] !== UPLOAD_ERR_OK || empty($file['tmp_name'])) {
+        return null;
+    }
     $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
     if (!in_array($ext, $allowed, true)) return null;
+
+    if (class_exists('finfo')) {
+        $finfo = new finfo(FILEINFO_MIME_TYPE);
+        $mime = (string) $finfo->file($file['tmp_name']);
+        $safeMimes = [
+            'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'webp' => 'image/webp',
+            'pdf' => 'application/pdf', 'doc' => 'application/msword',
+            'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'xls' => 'application/vnd.ms-excel',
+            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        ];
+        if (isset($safeMimes[$ext]) && $safeMimes[$ext] !== $mime) {
+            return null;
+        }
+    }
+
     $fname = $prefix . '_' . time() . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
-    // $uploadDir is retained for signature compatibility; storage_put resolves
-    // the destination (local uploads/info/ or the Supabase bucket).
     return storage_put($file['tmp_name'], 'info', $fname);
 }
 
