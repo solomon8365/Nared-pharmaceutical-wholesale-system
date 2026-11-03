@@ -527,7 +527,7 @@ $renderRow = function (int $idx, ?array $selectedProduct = null, int $qty = 1, f
                                 <?= $renderRow((int) $i, $seedProducts[(int) $item['product_id']] ?? null, (int) $item['quantity'], (float) ($item['discount'] ?? 0)) ?>
                             <?php endforeach; ?>
                         <?php else: ?>
-                            <?= $renderRow(0, $prefillPid > 0 ? ($seedProducts[$prefillPid] ?? null) : null, 1, 0) ?>
+                            <?= $renderRow(0, $prefillPid > 0 ? ($seedProducts[$prefillPid] ?? null) : null, max(1, (int)($_GET['qty'] ?? 1)), 0) ?>
                         <?php endif; ?>
                     </div>
                     <button type="button" class="ord-add-btn" onclick="addItem()"><i class="fas fa-plus"></i> Add Another Product</button>

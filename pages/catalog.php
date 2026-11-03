@@ -4,6 +4,8 @@ $search = trim($_GET['search'] ?? '');
 $catFilter = (int) ($_GET['category_id'] ?? 0);
 $mfrFilter = trim($_GET['manufacturer'] ?? '');
 $stockFilter = trim($_GET['stock_status'] ?? '');
+$rxFilter = isset($_GET['rx']) && $_GET['rx'] !== '' ? (int)$_GET['rx'] : -1;
+$dealFilter = !empty($_GET['deals']) ? 1 : 0;
 $sort = trim($_GET['sort'] ?? 'name');
 $viewMode = $_GET['view'] ?? 'grid';
 $activeTab = $_GET['tab'] ?? 'all';
@@ -16,10 +18,13 @@ $catCounts = [];
 try { foreach ($pdo->query("SELECT category_id, COUNT(*) AS cnt FROM products WHERE product_status = 'active' GROUP BY category_id") as $r) $catCounts[(int)$r['category_id']] = (int)$r['cnt']; } catch (Exception $e) {}
 $totalActive = array_sum($catCounts);
 
+$inStockCount = 0;
+try { $inStockCount = (int) $pdo->query("SELECT COUNT(*) FROM products WHERE product_status = 'active' AND stock_quantity > 0")->fetchColumn(); } catch (Exception $e) {}
+$inStockRate = $totalActive > 0 ? round(($inStockCount / $totalActive) * 100) : 100;
+
 $user = currentUser();
 $isCustomerUser = $user && isCustomer();
-// Internal stock detail (low-stock buckets, expiry dates, batch numbers) is shown only to
-// signed-in staff. Customers and guests see a binary In Stock / Out of Stock status.
+// Internal stock detail (low-stock buckets, expiry dates, batch numbers) is shown only to signed-in staff.
 $catShowInternal = $user !== null && !isCustomer();
 $customerId = 0;
 if ($isCustomerUser) {
@@ -28,23 +33,58 @@ if ($isCustomerUser) {
 
 /* ── Favorites ── */
 $favIds = [];
+$favProducts = [];
 if ($customerId) {
-    try { $favStmt = $pdo->prepare('SELECT product_id FROM customer_favorites WHERE customer_id = :cid'); $favStmt->execute(['cid' => $customerId]); $favIds = array_column($favStmt->fetchAll(), 'product_id'); } catch (Exception $e) {}
+    try {
+        $favStmt = $pdo->prepare('SELECT product_id FROM customer_favorites WHERE customer_id = :cid');
+        $favStmt->execute(['cid' => $customerId]);
+        $favIds = array_column($favStmt->fetchAll(), 'product_id');
+        if (!empty($favIds)) {
+            $fPh = implode(',', array_fill(0, count($favIds), '?'));
+            $fpStmt = $pdo->prepare("SELECT p.*, c.name AS category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id IN ($fPh) AND p.product_status = 'active'");
+            $fpStmt->execute($favIds);
+            $favProducts = $fpStmt->fetchAll();
+        }
+    } catch (Exception $e) {}
 }
 if (isset($_POST['_fav']) && $customerId) {
     require_csrf();
     $fid = (int)$_POST['product_id'];
     $exists = in_array($fid, $favIds);
-    if ($exists) { $pdo->prepare('DELETE FROM customer_favorites WHERE customer_id = :cid AND product_id = :pid')->execute(['cid' => $customerId, 'pid' => $fid]); }
-    else { $pdo->prepare('INSERT IGNORE INTO customer_favorites (customer_id, product_id) VALUES (:cid, :pid)')->execute(['cid' => $customerId, 'pid' => $fid]); }
+    if ($exists) {
+        $pdo->prepare('DELETE FROM customer_favorites WHERE customer_id = :cid AND product_id = :pid')->execute(['cid' => $customerId, 'pid' => $fid]);
+    } else {
+        $pdo->prepare('INSERT IGNORE INTO customer_favorites (customer_id, product_id) VALUES (:cid, :pid)')->execute(['cid' => $customerId, 'pid' => $fid]);
+    }
+    if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') {
+        echo json_encode(['success' => true, 'action' => $exists ? 'removed' : 'added']);
+        exit;
+    }
     header('Location: ' . $_SERVER['REQUEST_URI']);
     exit;
 }
 
 /* ── Comparison ── */
 $compareIds = [];
+$compareProducts = [];
 if ($customerId) {
-    try { $ciStmt = $pdo->prepare('SELECT product_id FROM product_comparisons WHERE customer_id = :cid'); $ciStmt->execute(['cid' => $customerId]); $compareIds = array_column($ciStmt->fetchAll(), 'product_id'); } catch (Exception $e) {}
+    try {
+        $ciStmt = $pdo->prepare('SELECT product_id FROM product_comparisons WHERE customer_id = :cid');
+        $ciStmt->execute(['cid' => $customerId]);
+        $compareIds = array_column($ciStmt->fetchAll(), 'product_id');
+        if (!empty($compareIds)) {
+            $cPh = implode(',', array_fill(0, count($compareIds), '?'));
+            $cStmt = $pdo->prepare("SELECT p.*, c.name AS category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id IN ($cPh) AND p.product_status = 'active'");
+            $cStmt->execute($compareIds);
+            $compareProducts = $cStmt->fetchAll();
+        }
+    } catch (Exception $e) {}
+}
+if (isset($_POST['_compare_clear']) && $customerId) {
+    require_csrf();
+    $pdo->prepare('DELETE FROM product_comparisons WHERE customer_id = :cid')->execute(['cid' => $customerId]);
+    header('Location: ' . $_SERVER['REQUEST_URI']);
+    exit;
 }
 if (isset($_POST['_compare']) && $customerId) {
     require_csrf();
@@ -79,6 +119,16 @@ if ($stockFilter === 'in_stock') $sql .= ' AND p.stock_quantity > 0';
 elseif ($catShowInternal && $stockFilter === 'low_stock') $sql .= ' AND p.stock_quantity > 0 AND p.stock_quantity <= 10';
 elseif ($stockFilter === 'out_of_stock') $sql .= ' AND p.stock_quantity <= 0';
 elseif ($catShowInternal && $stockFilter === 'expiring') $sql .= ' AND p.id IN (SELECT product_id FROM product_batches WHERE quantity > 0 AND expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 90 DAY))';
+
+if ($rxFilter === 1) {
+    $sql .= ' AND p.requires_prescription = 1';
+} elseif ($rxFilter === 0) {
+    $sql .= ' AND (p.requires_prescription = 0 OR p.requires_prescription IS NULL)';
+}
+
+if ($dealFilter === 1) {
+    $sql .= ' AND p.wholesale_price > 0 AND p.wholesale_price < p.price';
+}
 
 $orderBy = match($sort) { 'price_asc'=>'p.price ASC','price_desc'=>'p.price DESC','stock'=>'p.stock_quantity ASC','newest'=>'p.created_at DESC', default=>'p.name ASC' };
 $sql .= ' ORDER BY ' . $orderBy;
@@ -117,451 +167,2338 @@ function buildBatchJson(array $batchMap, int $pid): string {
     foreach ($batchMap[$pid] ?? [] as $b) $arr[] = ['batch'=>$b['batch_number'],'expiry'=>$b['expiry_date'],'qty'=>(int)$b['quantity']];
     return htmlspecialchars(json_encode($arr));
 }
+
 function stockBadge(int $s, bool $internal = false): array {
-    if ($s <= 0) return ['OUT OF STOCK','out','fa-times-circle'];
-    // "Low stock" is an internal operational signal; customers only ever see In/Out.
-    if ($internal && $s <= 10) return ['LOW STOCK','low','fa-exclamation-triangle'];
-    return ['IN STOCK','in','fa-check-circle'];
+    if ($s <= 0) return ['OUT OF STOCK', 'out', 'fa-times-circle'];
+    if ($internal && $s <= 10) return ['LOW STOCK', 'low', 'fa-exclamation-triangle'];
+    return ['IN STOCK', 'in', 'fa-check-circle'];
 }
+
 function catIcon(string $name): string {
     $n = strtolower($name);
-    $m = ['pain'=>'fa-tablets','analges'=>'fa-tablets','anti-inflamm'=>'fa-shield-virus','inflamm'=>'fa-shield-virus','antibiotic'=>'fa-capsules','antimal'=>'fa-bug','malaria'=>'fa-bug','vitamin'=>'fa-bolt','supplement'=>'fa-bolt','mineral'=>'fa-bolt','omega'=>'fa-bolt','cardio'=>'fa-heartbeat','heart'=>'fa-heartbeat','blood'=>'fa-heartbeat','gastro'=>'fa-disease','digest'=>'fa-disease','stomach'=>'fa-disease','respir'=>'fa-lungs','cough'=>'fa-lungs','cold'=>'fa-lungs','asthma'=>'fa-lungs','allerg'=>'fa-allergies','diabet'=>'fa-syringe','insulin'=>'fa-syringe','inject'=>'fa-syringe','derm'=>'fa-hand-holding-medical','skin'=>'fa-hand-holding-medical','hair'=>'fa-hand-holding-medical','eye'=>'fa-eye','bone'=>'fa-bone','ortho'=>'fa-bone','neuro'=>'fa-brain','immune'=>'fa-shield-virus','fever'=>'fa-thermometer','flu'=>'fa-thermometer','cough'=>'fa-lungs','general'=>'fa-prescription-bottle','other'=>'fa-prescription-bottle'];
+    $m = [
+        'pain'=>'fa-tablets','analges'=>'fa-tablets','anti-inflamm'=>'fa-shield-virus','inflamm'=>'fa-shield-virus',
+        'antibiotic'=>'fa-capsules','antimal'=>'fa-bug','malaria'=>'fa-bug','vitamin'=>'fa-bolt','supplement'=>'fa-bolt',
+        'mineral'=>'fa-bolt','omega'=>'fa-bolt','cardio'=>'fa-heartbeat','heart'=>'fa-heartbeat','blood'=>'fa-heartbeat',
+        'gastro'=>'fa-disease','digest'=>'fa-disease','stomach'=>'fa-disease','respir'=>'fa-lungs','cough'=>'fa-lungs',
+        'cold'=>'fa-lungs','asthma'=>'fa-lungs','allerg'=>'fa-allergies','diabet'=>'fa-syringe','insulin'=>'fa-syringe',
+        'inject'=>'fa-syringe','derm'=>'fa-hand-holding-medical','skin'=>'fa-hand-holding-medical','hair'=>'fa-hand-holding-medical',
+        'eye'=>'fa-eye','bone'=>'fa-bone','ortho'=>'fa-bone','neuro'=>'fa-brain','immune'=>'fa-shield-virus',
+        'fever'=>'fa-thermometer','flu'=>'fa-thermometer','general'=>'fa-prescription-bottle','other'=>'fa-prescription-bottle'
+    ];
     foreach ($m as $k => $icon) if (str_contains($n, $k)) return $icon;
     return 'fa-prescription-bottle';
 }
 
-/* ── Country flags ── */
+function getDosageTheme(string $form): array {
+    $f = strtolower(trim($form));
+    if (str_contains($f, 'tablet') || str_contains($f, 'pill') || str_contains($f, 'caplet')) {
+        return ['theme' => 'tablet', 'icon' => 'fa-tablets', 'label' => 'Oral Tablet'];
+    }
+    if (str_contains($f, 'capsule')) {
+        return ['theme' => 'capsule', 'icon' => 'fa-capsules', 'label' => 'Oral Capsule'];
+    }
+    if (str_contains($f, 'cream') || str_contains($f, 'ointment') || str_contains($f, 'gel')) {
+        return ['theme' => 'cream', 'icon' => 'fa-pump-medical', 'label' => 'Topical Formulation'];
+    }
+    if (str_contains($f, 'inhaler') || str_contains($f, 'aerosol') || str_contains($f, 'spray')) {
+        return ['theme' => 'inhaler', 'icon' => 'fa-wind', 'label' => 'Inhalation Aerosol'];
+    }
+    if (str_contains($f, 'powder') || str_contains($f, 'sachet') || str_contains($f, 'granule')) {
+        return ['theme' => 'powder', 'icon' => 'fa-box-tissue', 'label' => 'Oral Powder / Sachet'];
+    }
+    if (str_contains($f, 'inject') || str_contains($f, 'infus') || str_contains($f, 'vial') || str_contains($f, 'ampoule')) {
+        return ['theme' => 'injection', 'icon' => 'fa-syringe', 'label' => 'Injectable Solution'];
+    }
+    if (str_contains($f, 'syrup') || str_contains($f, 'suspension') || str_contains($f, 'liquid') || str_contains($f, 'solution') || str_contains($f, 'drop')) {
+        return ['theme' => 'syrup', 'icon' => 'fa-prescription-bottle', 'label' => 'Oral Liquid / Syrup'];
+    }
+    return ['theme' => 'general', 'icon' => 'fa-pills', 'label' => 'Pharmaceutical Product'];
+}
+
 $flags = ['Ethiopia'=>'🇪🇹','India'=>'🇮🇳','China'=>'🇨🇳','USA'=>'🇺🇸','Germany'=>'🇩🇪','UK'=>'🇬🇧','France'=>'🇫🇷','Japan'=>'🇯🇵','Switzerland'=>'🇨🇭','Italy'=>'🇮🇹','Turkey'=>'🇹🇷','Nigeria'=>'🇳🇬','Kenya'=>'🇰🇪','Egypt'=>'🇪🇬','South Korea'=>'🇰🇷','Brazil'=>'🇧🇷'];
 if (!function_exists('countryFlag')) {
     function countryFlag(string $country): string { global $flags; return $flags[$country] ?? '🌍'; }
 }
-?>
-<style>
-.cat{--cat-brand:#2563eb;--cat-brand-d:#1d4ed8;--cat-brand-l:#eff6ff;--cat-bg:#ffffff;--cat-bg2:#f8fafc;--cat-bg3:#f1f5f9;--cat-title:#0f172a;--cat-title2:#334155;--cat-mut:#64748b;--cat-faint:#94a3b8;--cat-line:#e2e8f0;--cat-line2:#f1f5f9;--cat-ok:#16a34a;--cat-warn:#d97706;--cat-bad:#dc2626;--cat-ring:rgba(37,99,235,0.12);max-width:1400px;margin:0 auto}
-body.dark-mode .cat{--cat-brand:#3b82f6;--cat-brand-d:#60a5fa;--cat-brand-l:#172554;--cat-bg:#1f2937;--cat-bg2:#111827;--cat-bg3:#374151;--cat-title:#f1f5f9;--cat-title2:#e5e7eb;--cat-mut:#9ca3af;--cat-faint:#6b7280;--cat-line:#374151;--cat-line2:#273244;--cat-ring:rgba(96,165,250,0.18)}
 
-/* ── Hero / page header ── */
-.cat-hero{position:relative;overflow:hidden;border-radius:16px;background:linear-gradient(135deg,#1e3a8a 0%,#1d4ed8 100%);color:#fff;padding:22px 26px;margin-bottom:14px;box-shadow:0 8px 22px rgba(29,78,216,0.22)}
-.cat-hero::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 90% 0%,rgba(255,255,255,0.14),transparent 46%)}
-.cat-hero-inner{position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:22px;flex-wrap:wrap}
-.cat-hero-eyebrow{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,0.16);border:1px solid rgba(255,255,255,0.28);padding:4px 12px;border-radius:99px;font-size:0.68rem;font-weight:700;letter-spacing:0.06em;text-transform:uppercase}
-.cat-hero-title{font-size:1.5rem;font-weight:800;margin:10px 0 5px;line-height:1.2;letter-spacing:-0.01em}
-.cat-hero-title .hl{color:#bae6fd}
-.cat-hero-sub{font-size:0.86rem;color:rgba(255,255,255,0.86);margin:0;max-width:620px;line-height:1.5}
-.cat-hero-stats{display:flex;gap:10px;flex-shrink:0}
-.cat-stat{background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.2);border-radius:12px;padding:9px 15px;min-width:92px;text-align:center}
-.cat-stat i{font-size:0.95rem;display:block;margin-bottom:3px;opacity:0.85}
-.cat-stat b{display:block;font-size:1.2rem;line-height:1.1}
-.cat-stat span{font-size:0.68rem;font-weight:600;opacity:0.86}
-
-/* ── Category chips ── */
-.cat-chips{display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;margin-bottom:14px;-webkit-overflow-scrolling:touch;scrollbar-width:none}
-.cat-chips::-webkit-scrollbar{display:none}
-.cat-chip{display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:99px;border:1.5px solid var(--cat-line);background:var(--cat-bg);color:var(--cat-mut);font-size:0.8rem;font-weight:600;text-decoration:none;white-space:nowrap;transition:all 0.15s}
-.cat-chip i{color:var(--cat-faint)}
-.cat-chip span{background:var(--cat-bg3);color:var(--cat-mut);padding:1px 8px;border-radius:99px;font-size:0.68rem;font-weight:700}
-.cat-chip:hover{border-color:var(--cat-brand);color:var(--cat-brand)}
-.cat-chip:hover i{color:var(--cat-brand)}
-.cat-chip.active{background:var(--cat-brand);border-color:var(--cat-brand);color:#fff}
-.cat-chip.active i{color:#fff}
-.cat-chip.active span{background:rgba(255,255,255,0.24);color:#fff}
-
-.cat-search{display:flex;gap:0;background:var(--cat-bg);border:2px solid var(--cat-line);border-radius:12px;overflow:hidden;margin-bottom:14px;transition:border-color 0.2s,box-shadow 0.2s;box-shadow:0 1px 2px rgba(15,23,42,0.04)}
-.cat-search:focus-within{border-color:var(--cat-brand);box-shadow:0 0 0 3px var(--cat-ring)}
-.cat-search-icon{padding:0 14px;display:flex;align-items:center;color:var(--cat-faint);font-size:1rem}
-.cat-search input{flex:1;border:none;outline:none;padding:12px 0;font-size:0.92rem;color:var(--cat-title);background:transparent;font-family:inherit}
-.cat-search input::placeholder{color:var(--cat-faint)}
-.cat-search-btn{padding:10px 20px;background:var(--cat-brand);color:#fff;border:none;font-weight:600;font-size:0.88rem;cursor:pointer;font-family:inherit;transition:background 0.15s}
-.cat-search-btn:hover{background:var(--cat-brand-d)}
-.cat-scan{padding:0 12px;border:none;background:none;color:var(--cat-mut);cursor:pointer;font-size:1rem;display:flex;align-items:center;transition:color 0.15s}
-.cat-scan:hover{color:var(--cat-brand)}
-
-.cat-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
-.cat-filters{display:flex;gap:8px;flex-wrap:wrap;flex:1}
-.cat-filter{padding:7px 14px;border:1.5px solid var(--cat-line);border-radius:8px;font-size:0.82rem;background:var(--cat-bg);color:var(--cat-title2);cursor:pointer;font-family:inherit;transition:all 0.15s;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2394a3b8'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px}
-.cat-filter:focus{outline:none;border-color:var(--cat-brand)}
-.cat-filter.active{border-color:var(--cat-brand);background-color:var(--cat-brand-l);color:var(--cat-brand)}
-.cat-clear{padding:7px 14px;border:1.5px solid var(--cat-line);border-radius:8px;background:var(--cat-bg);color:var(--cat-mut);font-size:0.82rem;font-weight:600;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:4px;transition:all 0.15s}
-.cat-clear:hover{border-color:var(--cat-bad);color:var(--cat-bad)}
-.cat-views{display:flex;border:1.5px solid var(--cat-line);border-radius:8px;overflow:hidden}
-.cat-view{padding:7px 12px;border:none;background:var(--cat-bg);color:var(--cat-mut);cursor:pointer;font-size:0.85rem;transition:all 0.15s}
-.cat-view.active{background:var(--cat-brand);color:#fff}
-.cat-view:hover:not(.active){background:var(--cat-bg2)}
-
-.cat-tabs{display:flex;gap:0;border-bottom:2px solid var(--cat-line);margin-bottom:20px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
-.cat-tabs::-webkit-scrollbar{display:none}
-.cat-tab{padding:10px 20px;font-size:0.88rem;font-weight:600;color:var(--cat-mut);cursor:pointer;border:none;background:none;border-bottom:2px solid transparent;margin-bottom:-2px;display:flex;align-items:center;gap:6px;transition:all 0.15s;text-decoration:none;white-space:nowrap;flex:0 0 auto}
-.cat-tab:hover{color:var(--cat-title)}
-.cat-tab.active{color:var(--cat-brand);border-bottom-color:var(--cat-brand)}
-.cat-tab-count{background:var(--cat-bg3);padding:2px 8px;border-radius:12px;font-size:0.72rem;font-weight:700;color:var(--cat-mut)}
-.cat-tab.active .cat-tab-count{background:var(--cat-brand-l);color:var(--cat-brand)}
-
-.cat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
-@media(max-width:1280px){.cat-grid{grid-template-columns:repeat(3,1fr)}}
-@media(max-width:992px){.cat-grid{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:640px){.cat-grid{grid-template-columns:1fr}}
-.cat-list{display:flex;flex-direction:column;gap:10px;margin-bottom:24px}
-
-/* ── Product cards ── */
-.cat-card{background:var(--cat-bg);border:1px solid var(--cat-line);border-radius:16px;overflow:hidden;transition:transform 0.22s cubic-bezier(0.4,0,0.2,1),box-shadow 0.22s,border-color 0.22s;display:flex;flex-direction:column;position:relative;box-shadow:0 1px 2px rgba(15,23,42,0.04)}
-.cat-card:hover{transform:translateY(-5px);box-shadow:0 18px 40px rgba(15,23,42,0.1);border-color:#bfdbfe}
-body.dark-mode .cat-card:hover{border-color:var(--cat-brand)}
-.cat-card::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--cat-brand),#0ea5e9);opacity:0;transition:opacity 0.22s;z-index:3}
-.cat-card:hover::before{opacity:1}
-.cat-card-top{position:absolute;top:12px;right:12px;display:flex;gap:6px;z-index:2}
-.cat-card-fav,.cat-card-cmp{width:32px;height:32px;border-radius:50%;border:1.5px solid var(--cat-line);background:var(--cat-bg);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all 0.15s;font-size:0.8rem;color:var(--cat-faint);box-shadow:0 1px 3px rgba(15,23,42,0.08)}
-.cat-card-fav:hover,.cat-card-fav.active{background:#fef2f2;border-color:#fca5a5;color:#dc2626}
-.cat-card-cmp:hover,.cat-card-cmp.active{background:var(--cat-brand-l);border-color:#93c5fd;color:var(--cat-brand)}
-.cat-card-img{height:160px;background:linear-gradient(135deg,var(--cat-bg2),var(--cat-bg3));display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;border-bottom:1px solid var(--cat-line2)}
-.cat-card-img img{width:100%;height:100%;object-fit:cover}
-.cat-card-img .no-img{color:var(--cat-line);font-size:2.6rem}
-.cat-card-badge{position:absolute;top:12px;left:12px;display:flex;gap:6px;flex-wrap:wrap}
-.cat-qv{position:absolute;left:50%;bottom:10px;transform:translate(-50%,10px);background:rgba(15,23,42,0.85);color:#fff;border:none;border-radius:99px;padding:7px 16px;font-size:0.76rem;font-weight:600;display:flex;align-items:center;gap:6px;cursor:pointer;opacity:0;transition:all 0.2s;backdrop-filter:blur(4px);font-family:inherit;z-index:2}
-.cat-card-img:hover .cat-qv,.cat-card-img:focus-within .cat-qv{opacity:1;transform:translate(-50%,0)}
-.cat-qv:hover{background:#0f172a}
-@media(hover:none){.cat-qv{display:none}}
-.cat-badge{padding:3px 10px;border-radius:20px;font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.03em}
-.cat-badge.in{background:rgba(22,163,74,0.12);color:var(--cat-ok);backdrop-filter:blur(4px)}
-.cat-badge.low{background:rgba(245,158,11,0.14);color:var(--cat-warn);backdrop-filter:blur(4px)}
-.cat-badge.out{background:rgba(220,38,38,0.12);color:var(--cat-bad);backdrop-filter:blur(4px)}
-.cat-badge.rx{background:rgba(124,58,237,0.12);color:#7c3aed;backdrop-filter:blur(4px)}
-.cat-badge.freq{background:rgba(220,38,38,0.9);color:#fff}
-.cat-badge.exp{background:rgba(190,18,60,0.12);color:#be123c;backdrop-filter:blur(4px)}
-body.dark-mode .cat-badge.exp{background:rgba(244,63,94,0.14);color:#fb7185}
-.cat-card-body{padding:16px 18px 4px;flex:1;display:flex;flex-direction:column;gap:8px}
-.cat-card-name{font-size:0.98rem;font-weight:800;color:var(--cat-title);margin:0;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;letter-spacing:-0.01em}
-.cat-card-sub{font-size:0.82rem;color:var(--cat-mut);margin:0;line-height:1.45}
-.cat-card-details{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;font-size:0.78rem;margin-top:auto;padding-top:8px}
-.cat-card-details dt{color:var(--cat-faint);font-weight:500}
-.cat-card-details dd{color:var(--cat-title2);font-weight:600;margin:0}
-.cat-card-origin{display:inline-flex;align-items:center;gap:4px;font-size:0.75rem;color:var(--cat-mut);margin-top:6px}
-.cat-stock{margin:10px 0 0;padding-top:10px;border-top:1px dashed var(--cat-line)}
-.cat-stock-top{display:flex;justify-content:space-between;align-items:center;font-size:0.72rem;margin-bottom:5px}
-.cat-stock-top b{font-weight:700;color:var(--cat-title2)}
-.cat-stock-top span{display:inline-flex;align-items:center;gap:5px;font-weight:700}
-.cat-in{color:var(--cat-ok)} .cat-low{color:var(--cat-warn)} .cat-out{color:var(--cat-bad)}
-.cat-stockbar{height:5px;background:var(--cat-bg3);border-radius:99px;overflow:hidden}
-.cat-stockfill{height:100%;border-radius:99px;transition:width 0.3s}
-.cat-card-footer{padding:10px 16px 14px;margin-top:auto;border-top:1px solid var(--cat-line2);display:flex;align-items:center;justify-content:space-between;gap:10px}
-.cat-card-price{font-size:1.15rem;font-weight:800;color:var(--cat-title)}
-.cat-card-order{display:inline-flex;align-items:center;gap:6px;padding:8px 18px;border-radius:8px;background:var(--cat-brand);color:#fff;font-weight:700;font-size:0.82rem;text-decoration:none;border:none;cursor:pointer;transition:all 0.15s;font-family:inherit}
-.cat-card-order:hover{background:var(--cat-brand-d);transform:translateY(-1px)}
-.cat-card-order:disabled{background:#cbd5e1;cursor:not-allowed;transform:none}
-.cat-card-order.login{background:#64748b}
-.cat-card-order.login:hover{background:#475569}
-.cat-card-order.ghost{background:var(--cat-bg);color:var(--cat-brand);border:1.5px solid var(--cat-line)}
-.cat-card-order.ghost:hover{background:var(--cat-brand-l);border-color:var(--cat-brand)}
-.cat-list-right .cat-card-order.ghost{padding:8px 14px}
-
-/* ── List view ── */
-.cat-list-card{background:var(--cat-bg);border:1px solid var(--cat-line);border-radius:12px;padding:16px 20px;display:flex;align-items:center;gap:16px;transition:all 0.2s}
-.cat-list-card:hover{border-color:#bfdbfe;box-shadow:0 4px 15px rgba(15,23,42,0.06)}
-body.dark-mode .cat-list-card:hover{border-color:var(--cat-brand)}
-.cat-list-img{width:60px;height:60px;border-radius:10px;background:var(--cat-bg3);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0}
-.cat-list-img img{width:100%;height:100%;object-fit:cover}
-.cat-list-img .no-img{color:var(--cat-line);font-size:1.5rem}
-.cat-list-info{flex:1;min-width:0}
-.cat-list-name{font-weight:700;font-size:0.92rem;color:var(--cat-title);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cat-list-sub{font-size:0.78rem;color:var(--cat-mut);margin-top:2px}
-.cat-list-meta{display:flex;gap:16px;margin-top:4px;font-size:0.78rem;color:var(--cat-mut)}
-.cat-list-meta span{display:flex;align-items:center;gap:4px}
-.cat-list-right{display:flex;align-items:center;gap:16px;flex-shrink:0}
-.cat-list-price{font-size:1rem;font-weight:800;color:var(--cat-title);text-align:right;white-space:nowrap}
-
-.cat-empty{text-align:center;padding:50px 20px;color:var(--cat-faint)}
-.cat-empty-ico{width:92px;height:92px;margin:0 auto 18px;border-radius:50%;background:linear-gradient(135deg,var(--cat-brand-l),var(--cat-bg2));display:flex;align-items:center;justify-content:center;font-size:2.1rem;color:var(--cat-brand);box-shadow:0 10px 24px rgba(15,23,42,0.05)}
-.cat-empty h3{font-size:1.1rem;color:var(--cat-title2);margin:0 0 6px}
-.cat-empty p{font-size:0.88rem}
-.cat-empty-reset{display:inline-flex;align-items:center;gap:6px;margin-top:14px;padding:10px 20px;background:var(--cat-brand);color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:0.88rem;transition:background 0.15s}
-.cat-empty-reset:hover{background:var(--cat-brand-d)}
-
-/* ── Product detail modal ── */
-.pd-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center;padding:20px}
-.pd-modal{background:var(--cat-bg);border-radius:16px;max-width:600px;width:100%;max-height:85vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3)}
-.pd-header{padding:20px 24px;border-bottom:1px solid var(--cat-line2);display:flex;gap:16px;align-items:flex-start}
-.pd-img{width:80px;height:80px;border-radius:12px;background:var(--cat-bg3);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0}
-.pd-img img{width:100%;height:100%;object-fit:cover}
-.pd-img .no-img{color:var(--cat-line);font-size:2rem}
-.pd-title{font-size:1.1rem;font-weight:700;color:var(--cat-title);margin:0 0 2px}
-.pd-sub{font-size:0.85rem;color:var(--cat-mut);margin:0}
-.pd-close{background:none;border:none;font-size:1.5rem;cursor:pointer;color:var(--cat-faint);padding:4px;line-height:1}
-.pd-close:hover{color:var(--cat-title)}
-.pd-body{padding:20px 24px}
-.pd-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.pd-field dt{font-size:0.72rem;color:var(--cat-faint);font-weight:600;text-transform:uppercase;letter-spacing:0.04em}
-.pd-field dd{font-size:0.88rem;color:var(--cat-title2);font-weight:600;margin:2px 0 0}
-.pd-section{margin-top:16px;padding-top:16px;border-top:1px solid var(--cat-line2)}
-.pd-section-title{font-size:0.78rem;font-weight:700;color:var(--cat-mut);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:8px}
-.pd-batch{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border:1px solid var(--cat-line);border-radius:8px;margin-bottom:6px;font-size:0.82rem}
-.pd-batch span{color:var(--cat-title2)}
-.pd-footer{padding:16px 24px;border-top:1px solid var(--cat-line2);display:flex;align-items:center;justify-content:space-between}
-
-@media(max-width:900px){.cat-hero-stats{width:100%;justify-content:flex-start;flex-wrap:wrap}}
-@media(max-width:768px){.cat-toolbar{flex-direction:column;align-items:stretch}.cat-filters{flex-direction:column}.cat-filter{width:100%}.cat-list-card{flex-direction:column;align-items:stretch}.cat-list-right{justify-content:space-between}.cat-list-meta{flex-wrap:wrap}.pd-grid{grid-template-columns:1fr}.cat-hero{padding:20px 18px}.cat-hero-title{font-size:1.3rem}}
-@media(max-width:520px){.cat-hero-stats{display:grid;grid-template-columns:repeat(3,1fr);width:100%}.cat-stat{min-width:0;padding:8px 6px}.cat-stat b{font-size:1.05rem}}
-</style>
-
-<section class="cat">
-<div class="cat-hero">
-    <div class="cat-hero-inner">
-        <div class="cat-hero-copy">
-            <span class="cat-hero-eyebrow"><i class="fas fa-capsules"></i> Pharmaceutical Catalog</span>
-            <h1 class="cat-hero-title">Everything your <span class="hl">pharmacy</span> needs</h1>
-            <p class="cat-hero-sub">Browse <?= number_format($totalActive) ?> active products across <?= count($catCounts) ?> categories from <?= count($allManufacturers) ?> manufacturers &mdash; search, filter and order in a few clicks.</p>
-        </div>
-        <div class="cat-hero-stats">
-            <div class="cat-stat"><i class="fas fa-box-open"></i><b><?= number_format($totalActive) ?></b><span>Products</span></div>
-            <div class="cat-stat"><i class="fas fa-th-large"></i><b><?= count($catCounts) ?></b><span>Categories</span></div>
-            <div class="cat-stat"><i class="fas fa-factory"></i><b><?= count($allManufacturers) ?></b><span>Manufacturers</span></div>
-        </div>
-    </div>
-</div>
-
-<!-- Category chips -->
-<div class="cat-chips">
-    <a class="cat-chip <?= $catFilter === 0 ? 'active' : '' ?>" href="?page=catalog&<?= http_build_query(array_merge($_GET, ['category_id' => '', 'tab' => 'all'])) ?>"><i class="fas fa-th-large"></i> All <span><?= $totalActive ?></span></a>
-    <?php foreach ($catCounts as $cid => $cnt): ?>
-    <a class="cat-chip <?= $catFilter === $cid ? 'active' : '' ?>" href="?page=catalog&<?= http_build_query(array_merge($_GET, ['category_id' => (string)$cid, 'tab' => 'all'])) ?>"><i class="fas <?= catIcon($catNames[$cid] ?? '') ?>"></i> <?= htmlspecialchars($catNames[$cid] ?? 'Category') ?> <span><?= $cnt ?></span></a>
-    <?php endforeach; ?>
-</div>
-
-<!-- Search -->
-<form class="cat-search" method="get" id="catSearchForm">
-    <input type="hidden" name="page" value="catalog">
-    <div class="cat-search-icon"><i class="fas fa-search"></i></div>
-    <input type="text" name="search" id="catSearchInput" placeholder="Search by name, brand, generic, SKU, barcode, manufacturer..." value="<?= htmlspecialchars($search) ?>">
-    <button type="button" class="cat-scan" onclick="openCameraScanner()" title="Scan barcode"><i class="fas fa-camera"></i></button>
-    <button type="button" class="cat-scan" id="catScanBtn" title="Type barcode"><i class="fas fa-barcode"></i></button>
-    <button type="submit" class="cat-search-btn"><i class="fas fa-search"></i> Search</button>
-</form>
-<input type="text" id="catBarcodeInput" style="position:absolute;left:-9999px;opacity:0" tabindex="-1">
-<input type="hidden" name="page" value="catalog" form="catFilterForm">
-
-<!-- Toolbar -->
-<div class="cat-toolbar">
-    <form class="cat-filters" method="get" id="catFilterForm">
-        <input type="hidden" name="page" value="catalog">
-        <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
-        <select name="category_id" class="cat-filter" onchange="this.form.submit()"><option value="">All Categories</option><?php foreach ($allCats as $c): ?><option value="<?= $c['id'] ?>"<?= $catFilter === (int)$c['id'] ? ' selected' : '' ?>><?= htmlspecialchars($c['name']) ?></option><?php endforeach; ?></select>
-        <select name="manufacturer" class="cat-filter" onchange="this.form.submit()"><option value="">All Manufacturers</option><?php foreach ($allManufacturers as $m): ?><option value="<?= htmlspecialchars($m) ?>"<?= $mfrFilter === $m ? ' selected' : '' ?>><?= htmlspecialchars($m) ?></option><?php endforeach; ?></select>
-        <select name="stock_status" class="cat-filter" onchange="this.form.submit()"><option value="">All Stock</option><option value="in_stock"<?= $stockFilter==='in_stock'?' selected':'' ?>>In Stock</option><?php if ($catShowInternal): ?><option value="low_stock"<?= $stockFilter==='low_stock'?' selected':'' ?>>Low Stock</option><?php endif; ?><option value="out_of_stock"<?= $stockFilter==='out_of_stock'?' selected':'' ?>>Out of Stock</option><?php if ($catShowInternal): ?><option value="expiring"<?= $stockFilter==='expiring'?' selected':'' ?>>Expiring Soon</option><?php endif; ?></select>
-        <select name="sort" class="cat-filter" onchange="this.form.submit()"><option value="name"<?= $sort==='name'?' selected':'' ?>>Name A-Z</option><option value="price_asc"<?= $sort==='price_asc'?' selected':'' ?>>Price Low-High</option><option value="price_desc"<?= $sort==='price_desc'?' selected':'' ?>>Price High-Low</option><option value="stock"<?= $sort==='stock'?' selected':'' ?>>Stock Low-High</option><option value="newest"<?= $sort==='newest'?' selected':'' ?>>Newest</option></select>
-        <?php if ($search||$catFilter||$mfrFilter||$stockFilter): ?><a href="?page=catalog" class="cat-clear"><i class="fas fa-times"></i> Clear</a><?php endif; ?>
-    </form>
-    <div class="cat-views">
-        <a href="?page=catalog&<?= http_build_query(array_merge($_GET,['view'=>'grid'])) ?>" class="cat-view <?= $viewMode==='grid'||$viewMode!=='list' ? 'active' : '' ?>"><i class="fas fa-th"></i></a>
-        <a href="?page=catalog&<?= http_build_query(array_merge($_GET,['view'=>'list'])) ?>" class="cat-view <?= $viewMode==='list' ? 'active' : '' ?>"><i class="fas fa-list"></i></a>
-    </div>
-</div>
-
-<!-- Tabs -->
-<div class="cat-tabs">
-    <a href="?page=catalog&tab=all&<?= http_build_query(array_diff_key($_GET,['tab'=>''])) ?>" class="cat-tab <?= $activeTab==='all'?'active':'' ?>"><i class="fas fa-th-large"></i> All Products <span class="cat-tab-count"><?= $totalProducts ?></span></a>
-    <a href="?page=catalog&tab=frequent&<?= http_build_query(array_diff_key($_GET,['tab'=>''])) ?>" class="cat-tab <?= $activeTab==='frequent'?'active':'' ?>"><i class="fas fa-fire"></i> Frequently Ordered <span class="cat-tab-count"><?= count($frequentlyOrdered) ?></span></a>
-    <a href="?page=catalog&tab=recent&<?= http_build_query(array_diff_key($_GET,['tab'=>''])) ?>" class="cat-tab <?= $activeTab==='recent'?'active':'' ?>"><i class="fas fa-clock"></i> Recently Purchased <span class="cat-tab-count"><?= count($recentlyPurchased) ?></span></a>
-</div>
-
-<?php
-$displayProducts = $activeTab === 'frequent' ? $frequentlyOrdered : ($activeTab === 'recent' ? $recentlyPurchased : $products);
+$displayProducts = match($activeTab) {
+    'frequent' => $frequentlyOrdered,
+    'recent' => $recentlyPurchased,
+    'favorites' => $favProducts,
+    default => $products
+};
 $tabFrequentIds = array_column($frequentlyOrdered, 'id');
 ?>
 
-<?php if (empty($displayProducts)): ?>
-<div class="cat-empty">
-    <div class="cat-empty-ico"><i class="fas fa-search"></i></div>
-    <h3>No products found</h3>
-    <p>Try adjusting your search or filters, or browse the full catalog.</p>
-    <a href="?page=catalog" class="cat-empty-reset"><i class="fas fa-undo-alt"></i> View All Products</a>
+<style>
+/* ═════════════════════════════════════════════════════════════════════════
+   MODERN ADVANCED PHARMACEUTICAL CATALOG STYLING
+═════════════════════════════════════════════════════════════════════════ */
+.cat-wrap {
+    --cat-blue-900: #0f172a;
+    --cat-blue-800: #1e3a8a;
+    --cat-blue-700: #1d4ed8;
+    --cat-blue-600: #2563eb;
+    --cat-blue-500: #3b82f6;
+    --cat-blue-100: #dbeafe;
+    --cat-blue-50:  #eff6ff;
+
+    --cat-emerald: #059669;
+    --cat-emerald-bg: #ecfdf5;
+    --cat-emerald-border: #a7f3d0;
+
+    --cat-amber: #d97706;
+    --cat-amber-bg: #fffbeb;
+    --cat-amber-border: #fde68a;
+
+    --cat-rose: #e11d48;
+    --cat-rose-bg: #fff1f2;
+    --cat-rose-border: #fecdd3;
+
+    --cat-purple: #7c3aed;
+    --cat-purple-bg: #f5f3ff;
+
+    --cat-bg: #ffffff;
+    --cat-bg-alt: #f8fafc;
+    --cat-bg-subtle: #f1f5f9;
+    --cat-border: #e2e8f0;
+    --cat-border-hover: #93c5fd;
+
+    --cat-title: #0f172a;
+    --cat-body: #334155;
+    --cat-muted: #64748b;
+    --cat-faint: #94a3b8;
+
+    --cat-card-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.05), 0 2px 6px -1px rgba(15, 23, 42, 0.03);
+    --cat-hover-shadow: 0 20px 35px -5px rgba(15, 23, 42, 0.12), 0 10px 15px -5px rgba(37, 99, 235, 0.08);
+
+    max-width: 1440px;
+    margin: 0 auto;
+    padding-bottom: 60px;
+}
+
+body.dark-mode .cat-wrap {
+    --cat-bg: #1e293b;
+    --cat-bg-alt: #0f172a;
+    --cat-bg-subtle: #334155;
+    --cat-border: #334155;
+    --cat-border-hover: #3b82f6;
+    --cat-title: #f8fafc;
+    --cat-body: #e2e8f0;
+    --cat-muted: #94a3b8;
+    --cat-faint: #64748b;
+    --cat-blue-50: #172554;
+    --cat-card-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    --cat-hover-shadow: 0 20px 40px rgba(0, 0, 0, 0.45);
+}
+
+/* ── Hero Banner ── */
+.cat-hero {
+    position: relative;
+    border-radius: 20px;
+    background: linear-gradient(135deg, #0b192c 0%, #1e3a8a 52%, #1d4ed8 100%);
+    color: #fff;
+    padding: 28px 32px;
+    margin-bottom: 20px;
+    box-shadow: 0 16px 36px -10px rgba(30, 58, 138, 0.35);
+    overflow: hidden;
+}
+.cat-hero::before {
+    content: "";
+    position: absolute;
+    top: -50%;
+    right: -20%;
+    width: 600px;
+    height: 600px;
+    background: radial-gradient(circle, rgba(56, 189, 248, 0.18) 0%, rgba(37, 99, 235, 0) 70%);
+    pointer-events: none;
+}
+.cat-hero::after {
+    content: "";
+    position: absolute;
+    bottom: -40%;
+    left: 20%;
+    width: 400px;
+    height: 400px;
+    background: radial-gradient(circle, rgba(147, 197, 253, 0.12) 0%, rgba(30, 58, 138, 0) 70%);
+    pointer-events: none;
+}
+.cat-hero-content {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 30px;
+    flex-wrap: wrap;
+}
+.cat-hero-left {
+    flex: 1;
+    min-width: 320px;
+}
+.cat-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 14px;
+    background: rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 99px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    backdrop-filter: blur(8px);
+}
+.cat-hero-title {
+    font-size: 1.85rem;
+    font-weight: 800;
+    line-height: 1.2;
+    margin: 12px 0 8px;
+    letter-spacing: -0.02em;
+}
+.cat-hero-title .hl {
+    background: linear-gradient(90deg, #60a5fa, #38bdf8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+.cat-hero-desc {
+    font-size: 0.92rem;
+    color: rgba(255, 255, 255, 0.88);
+    margin: 0;
+    line-height: 1.55;
+    max-width: 640px;
+}
+.cat-hero-trust {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 14px;
+    font-size: 0.75rem;
+    color: #bae6fd;
+    font-weight: 600;
+    flex-wrap: wrap;
+}
+.cat-hero-trust span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.cat-hero-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(110px, 1fr));
+    gap: 12px;
+    flex-shrink: 0;
+}
+.cat-stat-tile {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 14px;
+    padding: 12px 16px;
+    text-align: center;
+    backdrop-filter: blur(10px);
+    transition: transform 0.2s ease, background 0.2s;
+}
+.cat-stat-tile:hover {
+    transform: translateY(-2px);
+    background: rgba(255, 255, 255, 0.15);
+}
+.cat-stat-val {
+    font-size: 1.45rem;
+    font-weight: 800;
+    line-height: 1.1;
+    display: block;
+    color: #fff;
+}
+.cat-stat-lbl {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.8);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-top: 3px;
+    display: block;
+}
+
+/* ── Category Chips Bar ── */
+.cat-chips-bar {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+}
+.cat-chip-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 99px;
+    background: var(--cat-bg);
+    border: 1.5px solid var(--cat-border);
+    color: var(--cat-body);
+    font-size: 0.84rem;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+.cat-chip-item:hover {
+    border-color: var(--cat-blue-600);
+    color: var(--cat-blue-600);
+    transform: translateY(-1px);
+}
+.cat-chip-item.active {
+    background: var(--cat-blue-600);
+    border-color: var(--cat-blue-600);
+    color: #fff;
+    box-shadow: 0 4px 14px rgba(37, 99, 235, 0.3);
+}
+.cat-chip-badge {
+    padding: 1px 8px;
+    border-radius: 99px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    background: var(--cat-bg-subtle);
+    color: var(--cat-muted);
+}
+.cat-chip-item.active .cat-chip-badge {
+    background: rgba(255, 255, 255, 0.25);
+    color: #fff;
+}
+
+/* ── Search & Filter Controls ── */
+.cat-control-card {
+    background: var(--cat-bg);
+    border: 1.5px solid var(--cat-border);
+    border-radius: 16px;
+    padding: 18px 20px;
+    margin-bottom: 22px;
+    box-shadow: var(--cat-card-shadow);
+}
+.cat-search-box {
+    display: flex;
+    align-items: center;
+    background: var(--cat-bg-alt);
+    border: 2px solid var(--cat-border);
+    border-radius: 12px;
+    padding: 4px 6px 4px 16px;
+    margin-bottom: 14px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.cat-search-box:focus-within {
+    border-color: var(--cat-blue-600);
+    background: var(--cat-bg);
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+}
+.cat-search-input {
+    flex: 1;
+    border: none !important;
+    background: transparent !important;
+    padding: 10px 12px 10px 6px !important;
+    font-size: 0.96rem !important;
+    color: var(--cat-title) !important;
+    outline: none !important;
+    box-shadow: none !important;
+    margin: 0 !important;
+}
+.cat-search-input::placeholder {
+    color: var(--cat-faint);
+}
+.cat-search-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.cat-scan-btn {
+    border: 1px solid var(--cat-border);
+    background: var(--cat-bg);
+    color: var(--cat-muted);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 0.86rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.cat-scan-btn:hover {
+    border-color: var(--cat-blue-600);
+    color: var(--cat-blue-600);
+    background: var(--cat-blue-50);
+}
+.cat-submit-btn {
+    background: var(--cat-blue-600);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 22px;
+    font-weight: 700;
+    font-size: 0.9rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: background 0.15s, transform 0.1s;
+}
+.cat-submit-btn:hover {
+    background: var(--cat-blue-700);
+    transform: translateY(-1px);
+}
+
+/* ── Explicit Filter Row Toolbar (Overrides global CSS width:100%) ── */
+.cat-toolbar-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.cat-filters-inline {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 10px !important;
+    flex-wrap: wrap !important;
+    flex: 1 1 auto;
+    margin: 0 !important;
+}
+.cat-filters-inline select.cat-filter-select,
+form.cat-filters-inline select {
+    width: auto !important;
+    min-width: 150px !important;
+    max-width: 220px !important;
+    flex: 1 1 160px !important;
+    padding: 9px 32px 9px 12px !important;
+    border: 1.5px solid var(--cat-border) !important;
+    border-radius: 9px !important;
+    background-color: var(--cat-bg) !important;
+    color: var(--cat-body) !important;
+    font-size: 0.85rem !important;
+    font-weight: 600 !important;
+    outline: none !important;
+    cursor: pointer !important;
+    margin: 0 !important;
+    box-sizing: border-box !important;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%2364748b' d='M1.41 0L6 4.58L10.59 0L12 1.41L6 7.41L0 1.41L1.41 0Z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.cat-filters-inline select.cat-filter-select:focus {
+    border-color: var(--cat-blue-600) !important;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12) !important;
+}
+.cat-filters-inline select.cat-filter-select.is-active {
+    border-color: var(--cat-blue-600) !important;
+    background-color: var(--cat-blue-50) !important;
+    color: var(--cat-blue-700) !important;
+}
+
+.cat-clear-link {
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: var(--cat-rose-bg);
+    border: 1px solid var(--cat-rose-border);
+    color: var(--cat-rose);
+    font-size: 0.82rem;
+    font-weight: 700;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.cat-clear-link:hover {
+    background: var(--cat-rose);
+    color: #fff;
+}
+
+/* ── View Switcher ── */
+.cat-view-toggles {
+    display: inline-flex;
+    border: 1.5px solid var(--cat-border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--cat-bg-alt);
+}
+.cat-view-btn {
+    padding: 8px 14px;
+    border: none;
+    background: transparent;
+    color: var(--cat-muted);
+    cursor: pointer;
+    font-size: 0.9rem;
+    text-decoration: none;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+}
+.cat-view-btn.active {
+    background: var(--cat-blue-600);
+    color: #fff;
+    box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25);
+}
+
+/* ── Quick Filter Tags Row ── */
+.cat-qf-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--cat-border);
+    flex-wrap: wrap;
+}
+.cat-qf-label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--cat-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-right: 4px;
+}
+.cat-qf-chip {
+    padding: 4px 12px;
+    border-radius: 99px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--cat-body);
+    background: var(--cat-bg-alt);
+    border: 1px solid var(--cat-border);
+    text-decoration: none;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.cat-qf-chip:hover {
+    border-color: var(--cat-blue-500);
+    color: var(--cat-blue-600);
+    background: var(--cat-blue-50);
+}
+.cat-qf-chip.active {
+    background: var(--cat-blue-600);
+    border-color: var(--cat-blue-600);
+    color: #fff;
+}
+
+/* ── Smart Tabs Bar ── */
+.cat-nav-tabs {
+    display: flex;
+    gap: 6px;
+    border-bottom: 2px solid var(--cat-border);
+    margin-bottom: 24px;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.cat-nav-tabs::-webkit-scrollbar { display: none; }
+.cat-nav-tab {
+    padding: 12px 20px;
+    font-size: 0.92rem;
+    font-weight: 700;
+    color: var(--cat-muted);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+    transition: all 0.15s;
+}
+.cat-nav-tab:hover {
+    color: var(--cat-title);
+}
+.cat-nav-tab.active {
+    color: var(--cat-blue-600);
+    border-bottom-color: var(--cat-blue-600);
+}
+.cat-tab-badge {
+    padding: 2px 9px;
+    border-radius: 99px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    background: var(--cat-bg-subtle);
+    color: var(--cat-muted);
+}
+.cat-nav-tab.active .cat-tab-badge {
+    background: var(--cat-blue-100);
+    color: var(--cat-blue-700);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   PRODUCT GRID & CARDS
+═════════════════════════════════════════════════════════════════════════ */
+.cat-grid-layout {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 22px;
+    margin-bottom: 30px;
+}
+@media (max-width: 1320px) {
+    .cat-grid-layout { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 980px) {
+    .cat-grid-layout { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 600px) {
+    .cat-grid-layout { grid-template-columns: 1fr; }
+}
+
+.cat-card {
+    background: var(--cat-bg);
+    border: 1px solid var(--cat-border);
+    border-radius: 18px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    box-shadow: var(--cat-card-shadow);
+    transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.cat-card:hover {
+    transform: translateY(-6px);
+    box-shadow: var(--cat-hover-shadow);
+    border-color: var(--cat-border-hover);
+}
+.cat-card::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3.5px;
+    background: linear-gradient(90deg, #2563eb, #38bdf8);
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    z-index: 4;
+}
+.cat-card:hover::before {
+    opacity: 1;
+}
+
+/* ── Visual / Photo Area ── */
+.cat-card-visual {
+    height: 175px;
+    position: relative;
+    background: var(--cat-bg-alt);
+    border-bottom: 1px solid var(--cat-border);
+    overflow: hidden;
+}
+.cat-card-img-box {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+}
+.cat-card-img-box.has-photo img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    padding: 12px;
+    transition: transform 0.3s ease;
+}
+.cat-card:hover .cat-card-img-box.has-photo img {
+    transform: scale(1.08);
+}
+
+/* Themed Medical Illustrations for products without uploaded images */
+.cat-theme-tablet {
+    background: radial-gradient(circle at 50% 30%, #f0f7ff 0%, #dbeafe 100%);
+    color: #1d4ed8;
+}
+body.dark-mode .cat-theme-tablet {
+    background: radial-gradient(circle at 50% 30%, #1e293b 0%, #0f172a 100%);
+    color: #60a5fa;
+}
+
+.cat-theme-capsule {
+    background: radial-gradient(circle at 50% 30%, #ecfdf5 0%, #ccfbf1 100%);
+    color: #0f766e;
+}
+body.dark-mode .cat-theme-capsule {
+    background: radial-gradient(circle at 50% 30%, #064e3b 0%, #022c22 100%);
+    color: #34d399;
+}
+
+.cat-theme-cream {
+    background: radial-gradient(circle at 50% 30%, #fffbeb 0%, #fef3c7 100%);
+    color: #b45309;
+}
+body.dark-mode .cat-theme-cream {
+    background: radial-gradient(circle at 50% 30%, #451a03 0%, #1c1917 100%);
+    color: #fbbf24;
+}
+
+.cat-theme-inhaler {
+    background: radial-gradient(circle at 50% 30%, #f0fdfa 0%, #e0f2fe 100%);
+    color: #0284c7;
+}
+
+.cat-theme-powder {
+    background: radial-gradient(circle at 50% 30%, #faf5ff 0%, #ede9fe 100%);
+    color: #7c3aed;
+}
+
+.cat-theme-injection {
+    background: radial-gradient(circle at 50% 30%, #f5f3ff 0%, #e0e7ff 100%);
+    color: #4f46e5;
+}
+
+.cat-theme-syrup {
+    background: radial-gradient(circle at 50% 30%, #fff7ed 0%, #ffedd5 100%);
+    color: #c2410c;
+}
+
+.cat-theme-general {
+    background: radial-gradient(circle at 50% 30%, #f8fafc 0%, #e2e8f0 100%);
+    color: #475569;
+}
+
+.cat-illu-grid-pattern {
+    position: absolute;
+    inset: 0;
+    opacity: 0.18;
+    background-image: radial-gradient(currentColor 1.2px, transparent 1.2px);
+    background-size: 14px 14px;
+}
+.cat-illu-content {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: transform 0.25s ease;
+}
+.cat-card:hover .cat-illu-content {
+    transform: scale(1.05);
+}
+.cat-illu-icon-circle {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.92);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.85rem;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.07);
+    border: 1.5px solid rgba(255, 255, 255, 0.95);
+}
+body.dark-mode .cat-illu-icon-circle {
+    background: rgba(30, 41, 59, 0.88);
+    border-color: rgba(255, 255, 255, 0.12);
+}
+.cat-illu-badge-stamp {
+    display: inline-block;
+    padding: 3px 12px;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.92);
+    font-size: 0.74rem;
+    font-weight: 700;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+    letter-spacing: 0.02em;
+}
+body.dark-mode .cat-illu-badge-stamp {
+    background: rgba(15, 23, 42, 0.88);
+    color: #f1f5f9;
+}
+.cat-illu-watermark {
+    position: absolute;
+    bottom: 8px;
+    right: 10px;
+    font-size: 0.64rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    opacity: 0.45;
+}
+
+/* ── Badges on Visual Header ── */
+.cat-card-badges-left {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    z-index: 3;
+}
+.cat-pill-badge {
+    padding: 3.5px 10px;
+    border-radius: 99px;
+    font-size: 0.68rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+.cat-pill-badge.in {
+    background: rgba(16, 185, 129, 0.92);
+    color: #fff;
+}
+.cat-pill-badge.low {
+    background: rgba(245, 158, 11, 0.92);
+    color: #fff;
+}
+.cat-pill-badge.out {
+    background: rgba(239, 68, 68, 0.92);
+    color: #fff;
+}
+.cat-pill-badge.rx {
+    background: rgba(124, 58, 237, 0.92);
+    color: #fff;
+}
+.cat-pill-badge.otc {
+    background: rgba(14, 165, 233, 0.92);
+    color: #fff;
+}
+.cat-pill-badge.popular {
+    background: rgba(225, 29, 72, 0.95);
+    color: #fff;
+}
+
+.cat-dot-pulse {
+    width: 6.5px;
+    height: 6.5px;
+    border-radius: 50%;
+    background: #fff;
+    display: inline-block;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.4);
+    animation: catPulse 1.8s infinite;
+}
+@keyframes catPulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.3); opacity: 0.7; }
+}
+
+/* ── Top-Right Action Floating Buttons ── */
+.cat-card-actions-right {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    display: flex;
+    gap: 6px;
+    z-index: 3;
+}
+.cat-action-circle {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.8);
+    background: rgba(255, 255, 255, 0.92);
+    color: var(--cat-muted);
+    font-size: 0.86rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08);
+    backdrop-filter: blur(6px);
+    transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+body.dark-mode .cat-action-circle {
+    background: rgba(30, 41, 59, 0.9);
+    border-color: rgba(255, 255, 255, 0.15);
+    color: #cbd5e1;
+}
+.cat-action-circle:hover {
+    transform: scale(1.12);
+}
+.cat-action-circle.fav.active {
+    background: #ffe4e6;
+    border-color: #fda4af;
+    color: #e11d48;
+}
+.cat-action-circle.cmp.active {
+    background: var(--cat-blue-100);
+    border-color: #93c5fd;
+    color: var(--cat-blue-700);
+}
+
+/* ── Hover Quick-View Pill ── */
+.cat-quickview-btn {
+    position: absolute;
+    bottom: 12px;
+    left: 50%;
+    transform: translate(-50%, 15px);
+    opacity: 0;
+    background: rgba(15, 23, 42, 0.88);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    padding: 7px 18px;
+    border-radius: 99px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+    transition: all 0.22s ease;
+    z-index: 3;
+    pointer-events: none;
+}
+.cat-card-visual:hover .cat-quickview-btn {
+    opacity: 1;
+    transform: translate(-50%, 0);
+    pointer-events: auto;
+}
+.cat-quickview-btn:hover {
+    background: #0f172a;
+    border-color: rgba(255, 255, 255, 0.4);
+    transform: translate(-50%, -2px);
+}
+
+/* ── Card Body Details ── */
+.cat-card-body {
+    padding: 16px 18px 8px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+.cat-meta-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+.cat-cat-tag {
+    color: var(--cat-blue-600);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.cat-origin-tag {
+    color: var(--cat-muted);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.cat-card-title {
+    font-size: 1.05rem;
+    font-weight: 800;
+    color: var(--cat-title);
+    margin: 0 0 3px;
+    line-height: 1.35;
+    letter-spacing: -0.01em;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    min-height: 2.7em;
+}
+.cat-card-subtitle {
+    font-size: 0.82rem;
+    color: var(--cat-muted);
+    margin: 0 0 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-style: italic;
+}
+
+.cat-spec-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+.cat-spec-chip {
+    padding: 3px 9px;
+    border-radius: 6px;
+    background: var(--cat-bg-subtle);
+    border: 1px solid var(--cat-border);
+    font-size: 0.73rem;
+    font-weight: 600;
+    color: var(--cat-body);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.cat-spec-chip i {
+    color: var(--cat-faint);
+}
+
+.cat-mfr-row {
+    font-size: 0.76rem;
+    color: var(--cat-muted);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.cat-mfr-row i {
+    color: var(--cat-faint);
+}
+
+/* ── Stock depth line ── */
+.cat-stock-depth {
+    margin-top: auto;
+    padding-top: 8px;
+    border-top: 1px dashed var(--cat-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--cat-muted);
+    margin-bottom: 12px;
+}
+.cat-stock-depth.in { color: var(--cat-emerald); }
+.cat-stock-depth.low { color: var(--cat-amber); }
+.cat-stock-depth.out { color: var(--cat-rose); }
+
+/* ── Pricing Block ── */
+.cat-price-block {
+    background: var(--cat-bg-alt);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 10px;
+}
+.cat-price-primary {
+    font-size: 1.25rem;
+    font-weight: 800;
+    color: var(--cat-title);
+    line-height: 1;
+}
+.cat-price-curr {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--cat-muted);
+    margin-right: 2px;
+}
+.cat-wholesale-tag {
+    font-size: 0.73rem;
+    font-weight: 700;
+    color: var(--cat-emerald);
+    background: var(--cat-emerald-bg);
+    border: 1px solid var(--cat-emerald-border);
+    padding: 2px 7px;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+/* ── Card Footer Actions ── */
+.cat-card-footer {
+    padding: 0 18px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.cat-order-bar {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+}
+
+/* Quantity Stepper */
+.cat-stepper {
+    display: inline-flex;
+    align-items: center;
+    background: var(--cat-bg-subtle);
+    border: 1.5px solid var(--cat-border);
+    border-radius: 9px;
+    padding: 2px;
+    flex-shrink: 0;
+}
+.cat-step-btn {
+    width: 28px;
+    height: 32px;
+    border: none;
+    background: transparent;
+    color: var(--cat-body);
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+    border-radius: 6px;
+}
+.cat-step-btn:hover {
+    background: var(--cat-bg);
+    color: var(--cat-blue-600);
+}
+.cat-step-input {
+    width: 36px !important;
+    height: 32px !important;
+    border: none !important;
+    background: transparent !important;
+    text-align: center !important;
+    font-size: 0.86rem !important;
+    font-weight: 700 !important;
+    color: var(--cat-title) !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    outline: none !important;
+    -moz-appearance: textfield;
+}
+.cat-step-input::-webkit-outer-spin-button,
+.cat-step-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.cat-btn-add {
+    flex: 1;
+    background: var(--cat-blue-600);
+    color: #fff;
+    border: none;
+    border-radius: 9px;
+    padding: 8px 14px;
+    font-size: 0.84rem;
+    font-weight: 700;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25);
+    white-space: nowrap;
+}
+.cat-btn-add:hover {
+    background: var(--cat-blue-700);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+}
+.cat-btn-add.out {
+    background: var(--cat-bg-subtle);
+    color: var(--cat-faint);
+    border: 1px solid var(--cat-border);
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+}
+.cat-btn-add.login {
+    background: #475569;
+    box-shadow: none;
+}
+.cat-btn-add.login:hover {
+    background: #334155;
+}
+
+.cat-btn-specs {
+    border: 1.5px solid var(--cat-border);
+    background: transparent;
+    color: var(--cat-muted);
+    border-radius: 9px;
+    padding: 7px 12px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: all 0.15s;
+}
+.cat-btn-specs:hover {
+    background: var(--cat-bg-alt);
+    border-color: var(--cat-blue-500);
+    color: var(--cat-blue-600);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   LIST VIEW
+═════════════════════════════════════════════════════════════════════════ */
+.cat-list-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 30px;
+}
+.cat-list-item {
+    background: var(--cat-bg);
+    border: 1px solid var(--cat-border);
+    border-radius: 14px;
+    padding: 14px 18px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+}
+.cat-list-item:hover {
+    border-color: var(--cat-border-hover);
+    box-shadow: var(--cat-card-shadow);
+    transform: translateX(3px);
+}
+.cat-list-thumb {
+    width: 68px;
+    height: 68px;
+    border-radius: 10px;
+    overflow: hidden;
+    flex-shrink: 0;
+    border: 1px solid var(--cat-border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.cat-list-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    padding: 4px;
+}
+.cat-list-thumb-icon {
+    font-size: 1.6rem;
+}
+.cat-list-info {
+    flex: 1;
+    min-width: 0;
+}
+.cat-list-title-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.cat-list-title {
+    font-size: 0.98rem;
+    font-weight: 800;
+    color: var(--cat-title);
+    margin: 0;
+    text-decoration: none;
+}
+.cat-list-sub {
+    font-size: 0.8rem;
+    color: var(--cat-muted);
+    font-style: italic;
+    margin-top: 2px;
+}
+.cat-list-specs-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 6px;
+    font-size: 0.78rem;
+    color: var(--cat-muted);
+    flex-wrap: wrap;
+}
+.cat-list-specs-row span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.cat-list-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+}
+.cat-list-price-box {
+    text-align: right;
+}
+.cat-list-price {
+    font-size: 1.15rem;
+    font-weight: 800;
+    color: var(--cat-title);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   BOTTOM FLOATING COMPARE DRAWER
+═════════════════════════════════════════════════════════════════════════ */
+.cat-compare-drawer {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #0f172a;
+    color: #fff;
+    padding: 12px 24px;
+    border-radius: 99px;
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.35);
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    z-index: 1000;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    animation: catSlideUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes catSlideUp {
+    from { transform: translate(-50%, 60px); opacity: 0; }
+    to { transform: translate(-50%, 0); opacity: 1; }
+}
+.cat-cmp-icon-badge {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: var(--cat-blue-600);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+}
+.cat-cmp-btn-view {
+    background: #fff;
+    color: #0f172a;
+    border: none;
+    padding: 8px 18px;
+    border-radius: 99px;
+    font-weight: 800;
+    font-size: 0.84rem;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.cat-cmp-btn-view:hover {
+    background: #dbeafe;
+}
+.cat-cmp-btn-clear {
+    background: transparent;
+    color: #94a3b8;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    padding: 8px 14px;
+    border-radius: 99px;
+    font-weight: 700;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: color 0.15s;
+}
+.cat-cmp-btn-clear:hover {
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.4);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   MODALS (Product Details & Comparison)
+═════════════════════════════════════════════════════════════════════════ */
+.cat-modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.65);
+    z-index: 9999;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    backdrop-filter: blur(4px);
+}
+.cat-modal-sheet {
+    background: var(--cat-bg);
+    border-radius: 20px;
+    max-width: 720px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--cat-border);
+}
+.cat-modal-sheet.wide {
+    max-width: 960px;
+}
+.cat-modal-head {
+    padding: 22px 26px;
+    border-bottom: 1px solid var(--cat-border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+.cat-modal-head-title {
+    font-size: 1.25rem;
+    font-weight: 800;
+    color: var(--cat-title);
+    margin: 0;
+}
+.cat-modal-head-sub {
+    font-size: 0.85rem;
+    color: var(--cat-muted);
+    margin: 2px 0 0;
+}
+.cat-modal-close-btn {
+    background: var(--cat-bg-subtle);
+    border: none;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    color: var(--cat-muted);
+    font-size: 1.2rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+}
+.cat-modal-close-btn:hover {
+    background: #fee2e2;
+    color: #dc2626;
+}
+.cat-modal-content {
+    padding: 24px 26px;
+}
+.cat-modal-foot {
+    padding: 18px 26px;
+    border-top: 1px solid var(--cat-border);
+    background: var(--cat-bg-alt);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    border-radius: 0 0 20px 20px;
+}
+
+/* Compare Matrix Table */
+.cat-compare-table-wrap {
+    overflow-x: auto;
+}
+.cat-compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.86rem;
+}
+.cat-compare-table th,
+.cat-compare-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--cat-border);
+    text-align: left;
+}
+.cat-compare-table th.spec-name,
+.cat-compare-table td.spec-name {
+    width: 160px;
+    font-weight: 700;
+    color: var(--cat-muted);
+    background: var(--cat-bg-alt);
+}
+.cat-compare-table tr:hover td {
+    background: var(--cat-bg-subtle);
+}
+
+/* Empty State */
+.cat-empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    background: var(--cat-bg);
+    border-radius: 18px;
+    border: 1px dashed var(--cat-border);
+}
+.cat-empty-icon {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: var(--cat-blue-50);
+    color: var(--cat-blue-600);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2rem;
+    margin: 0 auto 16px;
+}
+.cat-empty-title {
+    font-size: 1.2rem;
+    font-weight: 800;
+    color: var(--cat-title);
+    margin: 0 0 6px;
+}
+.cat-empty-msg {
+    font-size: 0.9rem;
+    color: var(--cat-muted);
+    max-width: 440px;
+    margin: 0 auto 18px;
+    line-height: 1.5;
+}
+.cat-empty-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 22px;
+    background: var(--cat-blue-600);
+    color: #fff;
+    border-radius: 9px;
+    font-weight: 700;
+    text-decoration: none;
+    font-size: 0.88rem;
+}
+</style>
+
+<div class="cat-wrap">
+
+<!-- ════════════ HERO BANNER ════════════ -->
+<div class="cat-hero">
+    <div class="cat-hero-content">
+        <div class="cat-hero-left">
+            <span class="cat-eyebrow"><i class="fas fa-shield-halved"></i> Verified Wholesale Distribution</span>
+            <h1 class="cat-hero-title">Wholesale <span class="hl">Pharmaceutical</span> Catalog</h1>
+            <p class="cat-hero-desc">Direct manufacturer pricing, batch-level FEFO tracking, and reliable wholesale fulfillment for registered pharmacies and healthcare institutions.</p>
+            <div class="cat-hero-trust">
+                <span><i class="fas fa-check-circle"></i> GMP Certified Facilities</span>
+                <span><i class="fas fa-snowflake"></i> Temperature Controlled</span>
+                <span><i class="fas fa-bolt"></i> Fast Priority Dispatch</span>
+            </div>
+        </div>
+        <div class="cat-hero-stats">
+            <div class="cat-stat-tile">
+                <span class="cat-stat-val"><?= number_format($totalActive) ?></span>
+                <span class="cat-stat-lbl">Active Products</span>
+            </div>
+            <div class="cat-stat-tile">
+                <span class="cat-stat-val"><?= count($catCounts) ?></span>
+                <span class="cat-stat-lbl">Categories</span>
+            </div>
+            <div class="cat-stat-tile">
+                <span class="cat-stat-val"><?= count($allManufacturers) ?></span>
+                <span class="cat-stat-lbl">Manufacturers</span>
+            </div>
+            <div class="cat-stat-tile">
+                <span class="cat-stat-val"><?= $inStockRate ?>%</span>
+                <span class="cat-stat-lbl">In-Stock Rate</span>
+            </div>
+        </div>
+    </div>
 </div>
+
+<!-- ════════════ CATEGORY CHIPS BAR ════════════ -->
+<div class="cat-chips-bar">
+    <a class="cat-chip-item <?= $catFilter === 0 ? 'active' : '' ?>" href="?page=catalog&<?= http_build_query(array_merge($_GET, ['category_id' => '', 'tab' => 'all'])) ?>">
+        <i class="fas fa-th-large"></i> All Categories <span class="cat-chip-badge"><?= $totalActive ?></span>
+    </a>
+    <?php foreach ($catCounts as $cid => $cnt): ?>
+        <a class="cat-chip-item <?= $catFilter === $cid ? 'active' : '' ?>" href="?page=catalog&<?= http_build_query(array_merge($_GET, ['category_id' => (string)$cid, 'tab' => 'all'])) ?>">
+            <i class="fas <?= catIcon($catNames[$cid] ?? '') ?>"></i> <?= htmlspecialchars($catNames[$cid] ?? 'Category') ?> <span class="cat-chip-badge"><?= $cnt ?></span>
+        </a>
+    <?php endforeach; ?>
+</div>
+
+<!-- ════════════ SEARCH & TOOLBAR CONTROLS ════════════ -->
+<div class="cat-control-card">
+    <!-- Big Search Input -->
+    <form method="get" id="catSearchForm">
+        <input type="hidden" name="page" value="catalog">
+        <input type="hidden" name="tab" value="<?= htmlspecialchars($activeTab) ?>">
+        <div class="cat-search-box">
+            <i class="fas fa-search" style="color:var(--cat-faint);font-size:1.1rem;margin-right:6px"></i>
+            <input type="text" name="search" id="catSearchInput" class="cat-search-input" placeholder="Search by medicine name, generic formula, brand, manufacturer, dosage, barcode..." value="<?= htmlspecialchars($search) ?>" autocomplete="off">
+            <div class="cat-search-actions">
+                <button type="button" class="cat-scan-btn" onclick="openCameraScanner()" title="Scan product barcode with camera"><i class="fas fa-camera"></i> Camera</button>
+                <button type="button" class="cat-scan-btn" id="catScanBtn" title="Scan with handheld USB barcode reader"><i class="fas fa-barcode"></i> Scanner</button>
+                <button type="submit" class="cat-submit-btn"><i class="fas fa-magnifying-glass"></i> Search</button>
+            </div>
+        </div>
+    </form>
+    <input type="text" id="catBarcodeInput" style="position:absolute;left:-9999px;opacity:0" tabindex="-1">
+
+    <!-- Filters & Sort Row (Responsive flex, prevents 100% width stacking) -->
+    <div class="cat-toolbar-row">
+        <form class="cat-filters-inline" method="get" id="catFilterForm">
+            <input type="hidden" name="page" value="catalog">
+            <input type="hidden" name="search" value="<?= htmlspecialchars($search) ?>">
+            <input type="hidden" name="tab" value="<?= htmlspecialchars($activeTab) ?>">
+            <input type="hidden" name="view" value="<?= htmlspecialchars($viewMode) ?>">
+            <?php if ($rxFilter !== -1): ?><input type="hidden" name="rx" value="<?= $rxFilter ?>"><?php endif; ?>
+            <?php if ($dealFilter): ?><input type="hidden" name="deals" value="1"><?php endif; ?>
+
+            <select name="category_id" class="cat-filter-select <?= $catFilter > 0 ? 'is-active' : '' ?>" onchange="this.form.submit()">
+                <option value="">All Categories (<?= count($catCounts) ?>)</option>
+                <?php foreach ($allCats as $c): ?>
+                    <option value="<?= $c['id'] ?>" <?= $catFilter === (int)$c['id'] ? 'selected' : '' ?>><?= htmlspecialchars($c['name']) ?></option>
+                <?php endforeach; ?>
+            </select>
+
+            <select name="manufacturer" class="cat-filter-select <?= $mfrFilter !== '' ? 'is-active' : '' ?>" onchange="this.form.submit()">
+                <option value="">All Manufacturers (<?= count($allManufacturers) ?>)</option>
+                <?php foreach ($allManufacturers as $m): ?>
+                    <option value="<?= htmlspecialchars($m) ?>" <?= $mfrFilter === $m ? 'selected' : '' ?>><?= htmlspecialchars($m) ?></option>
+                <?php endforeach; ?>
+            </select>
+
+            <select name="stock_status" class="cat-filter-select <?= $stockFilter !== '' ? 'is-active' : '' ?>" onchange="this.form.submit()">
+                <option value="">All Stock Status</option>
+                <option value="in_stock" <?= $stockFilter === 'in_stock' ? 'selected' : '' ?>>In Stock</option>
+                <?php if ($catShowInternal): ?>
+                    <option value="low_stock" <?= $stockFilter === 'low_stock' ? 'selected' : '' ?>>Low Stock (≤10)</option>
+                    <option value="expiring" <?= $stockFilter === 'expiring' ? 'selected' : '' ?>>Expiring Soon (90d)</option>
+                <?php endif; ?>
+                <option value="out_of_stock" <?= $stockFilter === 'out_of_stock' ? 'selected' : '' ?>>Out of Stock</option>
+            </select>
+
+            <select name="sort" class="cat-filter-select" onchange="this.form.submit()">
+                <option value="name" <?= $sort === 'name' ? 'selected' : '' ?>>Name A-Z</option>
+                <option value="price_asc" <?= $sort === 'price_asc' ? 'selected' : '' ?>>Price: Low to High</option>
+                <option value="price_desc" <?= $sort === 'price_desc' ? 'selected' : '' ?>>Price: High to Low</option>
+                <option value="stock" <?= $sort === 'stock' ? 'selected' : '' ?>>Stock: Low to High</option>
+                <option value="newest" <?= $sort === 'newest' ? 'selected' : '' ?>>Newest Arrivals</option>
+            </select>
+
+            <?php if ($search || $catFilter || $mfrFilter || $stockFilter || $rxFilter !== -1 || $dealFilter): ?>
+                <a href="?page=catalog" class="cat-clear-link" title="Clear all active filters"><i class="fas fa-times"></i> Reset</a>
+            <?php endif; ?>
+        </form>
+
+        <div class="cat-view-toggles">
+            <a href="?page=catalog&<?= http_build_query(array_merge($_GET, ['view' => 'grid'])) ?>" class="cat-view-btn <?= $viewMode === 'grid' || $viewMode !== 'list' ? 'active' : '' ?>" title="Grid View"><i class="fas fa-th-large"></i></a>
+            <a href="?page=catalog&<?= http_build_query(array_merge($_GET, ['view' => 'list'])) ?>" class="cat-view-btn <?= $viewMode === 'list' ? 'active' : '' ?>" title="List / Bulk Re-Order View"><i class="fas fa-list"></i></a>
+        </div>
+    </div>
+
+    <!-- Quick Filter Tag Chips -->
+    <div class="cat-qf-bar">
+        <span class="cat-qf-label"><i class="fas fa-sliders"></i> Quick Filters:</span>
+        <a href="?page=catalog&<?= http_build_query(array_merge($_GET, ['stock_status' => $stockFilter === 'in_stock' ? '' : 'in_stock'])) ?>" class="cat-qf-chip <?= $stockFilter === 'in_stock' ? 'active' : '' ?>">
+            <i class="fas fa-check-circle"></i> In Stock Only
+        </a>
+        <a href="?page=catalog&<?= http_build_query(array_merge($_GET, ['rx' => $rxFilter === 1 ? '' : '1'])) ?>" class="cat-qf-chip <?= $rxFilter === 1 ? 'active' : '' ?>">
+            <i class="fas fa-prescription"></i> Prescription (Rx)
+        </a>
+        <a href="?page=catalog&<?= http_build_query(array_merge($_GET, ['rx' => $rxFilter === 0 ? '' : '0'])) ?>" class="cat-qf-chip <?= $rxFilter === 0 ? 'active' : '' ?>">
+            <i class="fas fa-shield-heart"></i> OTC Medicines
+        </a>
+        <a href="?page=catalog&<?= http_build_query(array_merge($_GET, ['deals' => $dealFilter ? '' : '1'])) ?>" class="cat-qf-chip <?= $dealFilter ? 'active' : '' ?>">
+            <i class="fas fa-tags"></i> Wholesale Specials
+        </a>
+    </div>
+</div>
+
+<!-- ════════════ SMART NAV TABS ════════════ -->
+<div class="cat-nav-tabs">
+    <a href="?page=catalog&tab=all&<?= http_build_query(array_diff_key($_GET, ['tab'=>''])) ?>" class="cat-nav-tab <?= $activeTab === 'all' ? 'active' : '' ?>">
+        <i class="fas fa-layer-group"></i> All Products <span class="cat-tab-badge" id="catLiveCount"><?= $totalProducts ?></span>
+    </a>
+    <a href="?page=catalog&tab=frequent&<?= http_build_query(array_diff_key($_GET, ['tab'=>''])) ?>" class="cat-nav-tab <?= $activeTab === 'frequent' ? 'active' : '' ?>">
+        <i class="fas fa-fire" style="color:#ea580c"></i> Frequently Ordered <span class="cat-tab-badge"><?= count($frequentlyOrdered) ?></span>
+    </a>
+    <a href="?page=catalog&tab=recent&<?= http_build_query(array_diff_key($_GET, ['tab'=>''])) ?>" class="cat-nav-tab <?= $activeTab === 'recent' ? 'active' : '' ?>">
+        <i class="fas fa-clock-rotate-left"></i> Recently Purchased <span class="cat-tab-badge"><?= count($recentlyPurchased) ?></span>
+    </a>
+    <?php if ($customerId): ?>
+    <a href="?page=catalog&tab=favorites&<?= http_build_query(array_diff_key($_GET, ['tab'=>''])) ?>" class="cat-nav-tab <?= $activeTab === 'favorites' ? 'active' : '' ?>">
+        <i class="fas fa-heart" style="color:#e11d48"></i> Saved Favorites <span class="cat-tab-badge"><?= count($favIds) ?></span>
+    </a>
+    <?php endif; ?>
+</div>
+
+<div id="catLiveEmptyNotice" style="display:none">
+    <div class="cat-empty-state">
+        <div class="cat-empty-icon"><i class="fas fa-search"></i></div>
+        <h3 class="cat-empty-title">No matching medicines found</h3>
+        <p class="cat-empty-msg">No products on this page match your live search. Try a broader search keyword.</p>
+    </div>
+</div>
+
+<?php if (empty($displayProducts)): ?>
+    <div class="cat-empty-state">
+        <div class="cat-empty-icon"><i class="fas fa-box-open"></i></div>
+        <h3 class="cat-empty-title">No products found</h3>
+        <p class="cat-empty-msg">No active products match your current search and filter criteria. You can reset filters to view our full wholesale inventory.</p>
+        <a href="?page=catalog" class="cat-empty-cta"><i class="fas fa-undo-alt"></i> Browse All Products</a>
+    </div>
 <?php else: ?>
 
-<?php if ($viewMode === 'list'): ?>
-<div class="cat-list">
+<!-- ════════════ GRID VIEW ════════════ -->
+<?php if ($viewMode !== 'list'): ?>
+<div class="cat-grid-layout" id="catProductGrid">
     <?php foreach ($displayProducts as $p):
-        $pid=(int)$p['id']; $stock=(int)$p['stock_quantity']; $sb=stockBadge($stock, $catShowInternal);
-        $isFav=in_array($pid,$favIds); $isCmp=in_array($pid,$compareIds); $isFrq=in_array($pid,$tabFrequentIds);
+        $pid = (int) $p['id'];
+        $stock = (int) $p['stock_quantity'];
+        $sb = stockBadge($stock, $catShowInternal);
+        $isFav = in_array($pid, $favIds);
+        $isCmp = in_array($pid, $compareIds);
+        $isFrq = in_array($pid, $tabFrequentIds);
+        $earliest = $expiryMap[$pid] ?? null;
+        $expSoon = ($earliest && $stock > 0 && strtotime($earliest) <= strtotime('+90 days'));
         $imgFull = storage_exists($p['image_path'], 'products') ? htmlspecialchars(storage_url($p['image_path'], 'products')) : '';
         $wp = ($isCustomerUser && (float)($p['wholesale_price'] ?? 0) > 0 && (float)$p['wholesale_price'] < (float)$p['price']) ? (float)$p['wholesale_price'] : 0;
+        $dosageInfo = getDosageTheme($p['dosage_form'] ?? '');
     ?>
-    <div class="cat-list-card" data-pid="<?= $pid ?>" data-name="<?= htmlspecialchars($p['name']) ?>" data-brand="<?= htmlspecialchars($p['brand']??'') ?>" data-generic="<?= htmlspecialchars($p['generic_name']??'') ?>" data-barcode="<?= htmlspecialchars($p['barcode']??'') ?>" data-dosage="<?= htmlspecialchars($p['dosage_form']??'') ?>" data-strength="<?= htmlspecialchars($p['strength']??'') ?>" data-mfr="<?= htmlspecialchars($p['manufacturer']??'') ?>" data-category="<?= htmlspecialchars($p['category_name']??'') ?>" data-price="<?= fmt((float)$p['price']) ?>" data-pack="<?= htmlspecialchars($p['pack_size']??'') ?>" data-unit="<?= htmlspecialchars($p['unit_of_measure']??'') ?>" data-country="<?= htmlspecialchars($p['country_of_origin']??'') ?>" data-storage="<?= htmlspecialchars($p['storage_condition']??'') ?>" data-desc="<?= htmlspecialchars($p['description']??'') ?>" data-image="<?= $imgFull ?>" data-mfg="<?= htmlspecialchars($p['manufacturing_date']??'') ?>" data-rx="<?= (int)($p['requires_prescription']??0) ?>" data-wp="<?= $wp > 0 ? fmt($wp) : '' ?>" data-avail="<?= $stock <= 0 ? 0 : 1 ?>" data-lowstock="<?= ($catShowInternal && $stock > 0 && $stock <= 10) ? 1 : 0 ?>" data-batches="<?= buildBatchJson($batchMap,$pid) ?>">
-        <div class="cat-list-img">
-            <?php if ($imgFull): ?><img src="<?= $imgFull ?>" alt=""><?php else: ?><span class="no-img"><i class="fas fa-pills"></i></span><?php endif; ?>
+    <div class="cat-card" data-pid="<?= $pid ?>" data-name="<?= htmlspecialchars($p['name']) ?>" data-brand="<?= htmlspecialchars($p['brand'] ?? '') ?>" data-generic="<?= htmlspecialchars($p['generic_name'] ?? '') ?>" data-barcode="<?= htmlspecialchars($p['barcode'] ?? '') ?>" data-dosage="<?= htmlspecialchars($p['dosage_form'] ?? '') ?>" data-strength="<?= htmlspecialchars($p['strength'] ?? '') ?>" data-mfr="<?= htmlspecialchars($p['manufacturer'] ?? '') ?>" data-category="<?= htmlspecialchars($p['category_name'] ?? '') ?>" data-price="<?= fmt((float)$p['price']) ?>" data-pack="<?= htmlspecialchars($p['pack_size'] ?? '') ?>" data-unit="<?= htmlspecialchars($p['unit_of_measure'] ?? '') ?>" data-country="<?= htmlspecialchars($p['country_of_origin'] ?? '') ?>" data-storage="<?= htmlspecialchars($p['storage_condition'] ?? '') ?>" data-desc="<?= htmlspecialchars($p['description'] ?? '') ?>" data-image="<?= $imgFull ?>" data-mfg="<?= htmlspecialchars($p['manufacturing_date'] ?? '') ?>" data-rx="<?= (int)($p['requires_prescription'] ?? 0) ?>" data-wp="<?= $wp > 0 ? fmt($wp) : '' ?>" data-avail="<?= $stock <= 0 ? 0 : 1 ?>" data-lowstock="<?= ($catShowInternal && $stock > 0 && $stock <= 10) ? 1 : 0 ?>" data-batches="<?= buildBatchJson($batchMap, $pid) ?>">
+        
+        <!-- Visual Header -->
+        <div class="cat-card-visual" onclick="showCatDetail(this.closest('.cat-card'))" style="cursor:pointer">
+            <!-- Left Badges -->
+            <div class="cat-card-badges-left">
+                <span class="cat-pill-badge <?= $sb[1] ?>">
+                    <span class="cat-dot-pulse"></span> <?= $sb[0] ?>
+                </span>
+                <?php if (!empty($p['requires_prescription'])): ?>
+                    <span class="cat-pill-badge rx" title="Prescription Required by Law"><i class="fas fa-prescription"></i> Rx</span>
+                <?php else: ?>
+                    <span class="cat-pill-badge otc" title="Over-the-Counter Medicine"><i class="fas fa-shield-heart"></i> OTC</span>
+                <?php endif; ?>
+                <?php if ($isFrq): ?>
+                    <span class="cat-pill-badge popular" title="Frequently Ordered by Pharmacies"><i class="fas fa-fire"></i> Best Seller</span>
+                <?php endif; ?>
+                <?php if ($catShowInternal && $expSoon): ?>
+                    <span class="cat-pill-badge low" title="Expires soon"><i class="fas fa-hourglass-half"></i> Exp <?= date('M Y', strtotime($earliest)) ?></span>
+                <?php endif; ?>
+            </div>
+
+            <!-- Right Action Buttons -->
+            <div class="cat-card-actions-right" onclick="event.stopPropagation()">
+                <?php if ($isCustomerUser): ?>
+                    <button type="button" class="cat-action-circle fav <?= $isFav ? 'active' : '' ?>" onclick="catToggleFav(event, <?= $pid ?>)" title="<?= $isFav ? 'Remove Favorite' : 'Save to Favorites' ?>">
+                        <i class="<?= $isFav ? 'fa-solid' : 'fa-regular' ?> fa-heart"></i>
+                    </button>
+                    <button type="button" class="cat-action-circle cmp <?= $isCmp ? 'active' : '' ?>" onclick="catToggleCmp(event, <?= $pid ?>)" title="<?= $isCmp ? 'Remove from Comparison' : 'Add to Compare' ?>">
+                        <i class="fa-solid fa-scale-balanced"></i>
+                    </button>
+                <?php endif; ?>
+            </div>
+
+            <!-- Artwork / Product Photo -->
+            <?php if ($imgFull): ?>
+                <div class="cat-card-img-box has-photo">
+                    <img src="<?= $imgFull ?>" alt="<?= htmlspecialchars($p['name']) ?>" loading="lazy">
+                </div>
+            <?php else: ?>
+                <div class="cat-card-img-box cat-theme-<?= $dosageInfo['theme'] ?>">
+                    <div class="cat-illu-grid-pattern"></div>
+                    <div class="cat-illu-content">
+                        <div class="cat-illu-icon-circle">
+                            <i class="fa-solid <?= $dosageInfo['icon'] ?>"></i>
+                        </div>
+                        <div class="cat-illu-badge-stamp">
+                            <span class="cat-stamp-strength"><?= htmlspecialchars($p['strength'] ?: ($p['dosage_form'] ?: 'Standard')) ?></span>
+                        </div>
+                    </div>
+                    <div class="cat-illu-watermark"><?= htmlspecialchars($dosageInfo['label']) ?></div>
+                </div>
+            <?php endif; ?>
+
+            <button type="button" class="cat-quickview-btn" onclick="catQuickView(event)">
+                <i class="fas fa-eye"></i> Quick View
+            </button>
+        </div>
+
+        <!-- Card Body -->
+        <div class="cat-card-body">
+            <div class="cat-meta-row">
+                <span class="cat-cat-tag"><i class="fas <?= catIcon($p['category_name'] ?? '') ?>"></i> <?= htmlspecialchars($p['category_name'] ?? 'Pharmaceuticals') ?></span>
+                <?php if ($p['country_of_origin']): ?>
+                    <span class="cat-origin-tag"><?= countryFlag($p['country_of_origin']) ?> <?= htmlspecialchars($p['country_of_origin']) ?></span>
+                <?php endif; ?>
+            </div>
+
+            <h3 class="cat-card-title" title="<?= htmlspecialchars($p['name']) ?>" onclick="showCatDetail(this.closest('.cat-card'))" style="cursor:pointer"><?= htmlspecialchars($p['name']) ?></h3>
+            <div class="cat-card-subtitle"><?= htmlspecialchars(($p['generic_name'] ?? '') ?: ($p['brand'] ?? '')) ?></div>
+
+            <div class="cat-spec-chips">
+                <?php if ($p['dosage_form']): ?>
+                    <span class="cat-spec-chip"><i class="fas fa-capsules"></i> <?= htmlspecialchars($p['dosage_form']) ?></span>
+                <?php endif; ?>
+                <?php if ($p['strength']): ?>
+                    <span class="cat-spec-chip"><i class="fas fa-weight-scale"></i> <?= htmlspecialchars($p['strength']) ?></span>
+                <?php endif; ?>
+                <?php if ($p['pack_size']): ?>
+                    <span class="cat-spec-chip"><i class="fas fa-box"></i> <?= htmlspecialchars($p['pack_size']) ?></span>
+                <?php endif; ?>
+            </div>
+
+            <div class="cat-mfr-row">
+                <i class="fas fa-industry"></i>
+                <span><?= htmlspecialchars($p['manufacturer'] ?: 'Verified Manufacturer') ?></span>
+            </div>
+
+            <div class="cat-stock-depth <?= $sb[1] ?>">
+                <span><i class="fas fa-boxes-stacked"></i> <?= $stock > 0 ? number_format($stock) . ' units available' : 'Currently Backordered' ?></span>
+                <?php if ($p['sku'] || $p['barcode']): ?>
+                    <span style="font-family:monospace;color:var(--cat-faint)">#<?= htmlspecialchars($p['barcode'] ?: $p['sku']) ?></span>
+                <?php endif; ?>
+            </div>
+
+            <div class="cat-price-block">
+                <div>
+                    <span style="font-size:0.7rem;font-weight:700;color:var(--cat-muted);text-transform:uppercase;display:block">Unit Price</span>
+                    <div class="cat-price-primary"><span class="cat-price-curr"><?= currency_sym() ?></span><?= number_format((float)$p['price'], 2) ?></div>
+                </div>
+                <?php if ($wp > 0): ?>
+                    <div style="text-align:right">
+                        <span class="cat-wholesale-tag" title="Wholesale / Bulk order price"><i class="fas fa-tag"></i> WS: <?= fmt($wp) ?></span>
+                        <div style="font-size:0.68rem;font-weight:700;color:var(--cat-emerald);margin-top:2px">Save <?= round((1 - ($wp / (float)$p['price'])) * 100) ?>%</div>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <!-- Card Footer -->
+        <div class="cat-card-footer">
+            <div class="cat-order-bar">
+                <?php if ($stock <= 0): ?>
+                    <button class="cat-btn-add out" disabled><i class="fas fa-ban"></i> Out of Stock</button>
+                <?php elseif ($isCustomerUser): ?>
+                    <div class="cat-stepper" onclick="event.stopPropagation()">
+                        <button type="button" class="cat-step-btn minus" onclick="stepQty(this, -1)">−</button>
+                        <input type="number" class="cat-step-input" value="1" min="1" max="<?= max(1, $stock) ?>" data-pid="<?= $pid ?>" onchange="validateStep(this)">
+                        <button type="button" class="cat-step-btn plus" onclick="stepQty(this, 1)">+</button>
+                    </div>
+                    <a href="index.php?page=place_order&product_id=<?= $pid ?>&qty=1" class="cat-btn-add" onclick="submitToOrder(event, this, <?= $pid ?>)">
+                        <i class="fas fa-cart-plus"></i> Add to Order
+                    </a>
+                <?php else: ?>
+                    <a href="index.php?page=login" class="cat-btn-add login" onclick="event.stopPropagation()">
+                        <i class="fas fa-sign-in-alt"></i> Sign in to Order
+                    </a>
+                <?php endif; ?>
+            </div>
+            <button type="button" class="cat-btn-specs" onclick="event.stopPropagation();showCatDetail(this.closest('.cat-card'))">
+                <i class="fas fa-circle-info"></i> View Clinical Specs
+            </button>
+        </div>
+    </div>
+    <?php endforeach; ?>
+</div>
+
+<!-- ════════════ LIST VIEW ════════════ -->
+<?php else: ?>
+<div class="cat-list-layout" id="catProductList">
+    <?php foreach ($displayProducts as $p):
+        $pid = (int) $p['id'];
+        $stock = (int) $p['stock_quantity'];
+        $sb = stockBadge($stock, $catShowInternal);
+        $isFav = in_array($pid, $favIds);
+        $isCmp = in_array($pid, $compareIds);
+        $imgFull = storage_exists($p['image_path'], 'products') ? htmlspecialchars(storage_url($p['image_path'], 'products')) : '';
+        $wp = ($isCustomerUser && (float)($p['wholesale_price'] ?? 0) > 0 && (float)$p['wholesale_price'] < (float)$p['price']) ? (float)$p['wholesale_price'] : 0;
+        $dosageInfo = getDosageTheme($p['dosage_form'] ?? '');
+    ?>
+    <div class="cat-list-item" data-pid="<?= $pid ?>" data-name="<?= htmlspecialchars($p['name']) ?>" data-brand="<?= htmlspecialchars($p['brand'] ?? '') ?>" data-generic="<?= htmlspecialchars($p['generic_name'] ?? '') ?>" data-barcode="<?= htmlspecialchars($p['barcode'] ?? '') ?>" data-dosage="<?= htmlspecialchars($p['dosage_form'] ?? '') ?>" data-strength="<?= htmlspecialchars($p['strength'] ?? '') ?>" data-mfr="<?= htmlspecialchars($p['manufacturer'] ?? '') ?>" data-category="<?= htmlspecialchars($p['category_name'] ?? '') ?>" data-price="<?= fmt((float)$p['price']) ?>" data-pack="<?= htmlspecialchars($p['pack_size'] ?? '') ?>" data-unit="<?= htmlspecialchars($p['unit_of_measure'] ?? '') ?>" data-country="<?= htmlspecialchars($p['country_of_origin'] ?? '') ?>" data-storage="<?= htmlspecialchars($p['storage_condition'] ?? '') ?>" data-desc="<?= htmlspecialchars($p['description'] ?? '') ?>" data-image="<?= $imgFull ?>" data-mfg="<?= htmlspecialchars($p['manufacturing_date'] ?? '') ?>" data-rx="<?= (int)($p['requires_prescription'] ?? 0) ?>" data-wp="<?= $wp > 0 ? fmt($wp) : '' ?>" data-avail="<?= $stock <= 0 ? 0 : 1 ?>" data-lowstock="<?= ($catShowInternal && $stock > 0 && $stock <= 10) ? 1 : 0 ?>" data-batches="<?= buildBatchJson($batchMap, $pid) ?>">
+        <div class="cat-list-thumb cat-theme-<?= $dosageInfo['theme'] ?>">
+            <?php if ($imgFull): ?>
+                <img src="<?= $imgFull ?>" alt="<?= htmlspecialchars($p['name']) ?>">
+            <?php else: ?>
+                <span class="cat-list-thumb-icon"><i class="fa-solid <?= $dosageInfo['icon'] ?>"></i></span>
+            <?php endif; ?>
         </div>
         <div class="cat-list-info">
-            <div class="cat-list-name"><?= htmlspecialchars($p['name']) ?></div>
+            <div class="cat-list-title-row">
+                <a href="#" class="cat-list-title" onclick="event.preventDefault();showCatDetail(this.closest('.cat-list-item'))"><?= htmlspecialchars($p['name']) ?></a>
+                <span class="cat-pill-badge <?= $sb[1] ?>" style="font-size:0.64rem"><span class="cat-dot-pulse"></span> <?= $sb[0] ?></span>
+                <?php if (!empty($p['requires_prescription'])): ?>
+                    <span class="cat-pill-badge rx" style="font-size:0.64rem">Rx</span>
+                <?php endif; ?>
+            </div>
             <div class="cat-list-sub"><?= htmlspecialchars(($p['generic_name'] ?? '') ?: ($p['brand'] ?? '')) ?></div>
-            <div class="cat-list-meta">
-                <?php if ($p['strength']): ?><span><i class="fas fa-weight-hanging"></i> <?= htmlspecialchars($p['strength']) ?></span><?php endif; ?>
-                <?php if ($p['dosage_form']): ?><span><i class="fas fa-pills"></i> <?= htmlspecialchars($p['dosage_form']) ?></span><?php endif; ?>
-                <?php if ($p['category_name']): ?><span><i class="fas fa-th-large"></i> <?= htmlspecialchars($p['category_name']) ?></span><?php endif; ?>
-                <?php if ($p['manufacturer']): ?><span><i class="fas fa-factory"></i> <?= htmlspecialchars($p['manufacturer']) ?></span><?php endif; ?>
+            <div class="cat-list-specs-row">
+                <?php if ($p['dosage_form']): ?><span><i class="fas fa-capsules"></i> <?= htmlspecialchars($p['dosage_form']) ?></span><?php endif; ?>
+                <?php if ($p['strength']): ?><span><i class="fas fa-weight-scale"></i> <?= htmlspecialchars($p['strength']) ?></span><?php endif; ?>
+                <?php if ($p['category_name']): ?><span><i class="fas fa-tag"></i> <?= htmlspecialchars($p['category_name']) ?></span><?php endif; ?>
+                <?php if ($p['manufacturer']): ?><span><i class="fas fa-industry"></i> <?= htmlspecialchars($p['manufacturer']) ?></span><?php endif; ?>
+                <?php if ($p['country_of_origin']): ?><span><?= countryFlag($p['country_of_origin']) ?> <?= htmlspecialchars($p['country_of_origin']) ?></span><?php endif; ?>
             </div>
         </div>
         <div class="cat-list-right">
-            <div>
+            <div class="cat-list-price-box">
                 <div class="cat-list-price"><?= fmt((float)$p['price']) ?></div>
-                <span class="cat-badge <?= $sb[1] ?>" style="margin-top:4px"><i class="fas <?= $sb[2] ?>"></i> <?= $sb[0] ?></span>
+                <?php if ($wp > 0): ?>
+                    <span class="cat-wholesale-tag">WS: <?= fmt($wp) ?></span>
+                <?php endif; ?>
             </div>
-            <button type="button" class="cat-card-order ghost" onclick="showCatDetail(this.closest('.cat-list-card'))"><i class="fas fa-eye"></i> Details</button>
-            <?php if ($isCustomerUser): ?>
-            <?php if ($stock <= 0): ?>
-            <button class="cat-card-order" disabled title="Out of stock"><i class="fas fa-times-circle"></i> Out of Stock</button>
-            <?php else: ?>
-            <a class="cat-card-order" href="index.php?page=place_order&product_id=<?= $pid ?>"><i class="fas fa-cart-plus"></i> Add to Order</a>
-            <?php endif; ?>
-            <?php else: ?>
-            <a class="cat-card-order login" href="index.php?page=login"><i class="fas fa-sign-in-alt"></i> Sign In</a>
-            <?php endif; ?>
-        </div>
-    </div>
-    <?php endforeach; ?>
-</div>
-
-<?php else: ?>
-<div class="cat-grid">
-    <?php foreach ($displayProducts as $p):
-        $pid=(int)$p['id']; $stock=(int)$p['stock_quantity']; $sb=stockBadge($stock, $catShowInternal);
-        $isFav=in_array($pid,$favIds); $isCmp=in_array($pid,$compareIds); $isFrq=in_array($pid,$tabFrequentIds);
-        $earliest=$expiryMap[$pid]??null; $expSoon=($earliest && $stock>0 && strtotime($earliest) <= strtotime('+90 days'));
-        $imgFull = storage_exists($p['image_path'], 'products') ? htmlspecialchars(storage_url($p['image_path'], 'products')) : '';
-        // Wholesale price is only shown to signed-in customers, and only when the business rule
-        // applies (wholesale_price is set and lower than retail). It is the price used on pickup orders.
-        $wp = ($isCustomerUser && (float)($p['wholesale_price'] ?? 0) > 0 && (float)$p['wholesale_price'] < (float)$p['price']) ? (float)$p['wholesale_price'] : 0;
-    ?>
-    <div class="cat-card" onclick="showCatDetail(this)" data-pid="<?= $pid ?>" data-name="<?= htmlspecialchars($p['name']) ?>" data-brand="<?= htmlspecialchars($p['brand']??'') ?>" data-generic="<?= htmlspecialchars($p['generic_name']??'') ?>" data-barcode="<?= htmlspecialchars($p['barcode']??'') ?>" data-dosage="<?= htmlspecialchars($p['dosage_form']??'') ?>" data-strength="<?= htmlspecialchars($p['strength']??'') ?>" data-mfr="<?= htmlspecialchars($p['manufacturer']??'') ?>" data-category="<?= htmlspecialchars($p['category_name']??'') ?>" data-price="<?= fmt((float)$p['price']) ?>" data-pack="<?= htmlspecialchars($p['pack_size']??'') ?>" data-unit="<?= htmlspecialchars($p['unit_of_measure']??'') ?>" data-country="<?= htmlspecialchars($p['country_of_origin']??'') ?>" data-storage="<?= htmlspecialchars($p['storage_condition']??'') ?>" data-desc="<?= htmlspecialchars($p['description']??'') ?>" data-image="<?= $imgFull ?>" data-mfg="<?= htmlspecialchars($p['manufacturing_date']??'') ?>" data-rx="<?= (int)($p['requires_prescription']??0) ?>" data-wp="<?= $wp > 0 ? fmt($wp) : '' ?>" data-avail="<?= $stock <= 0 ? 0 : 1 ?>" data-lowstock="<?= ($catShowInternal && $stock > 0 && $stock <= 10) ? 1 : 0 ?>" data-batches="<?= buildBatchJson($batchMap,$pid) ?>">
-        <div class="cat-card-top">
-            <?php if ($isCustomerUser): ?>
-            <form method="post" onclick="event.stopPropagation()" style="display:inline"><?= csrf_field() ?><input type="hidden" name="_fav" value="1"><input type="hidden" name="product_id" value="<?= $pid ?>"><button type="submit" class="cat-card-fav <?= $isFav?'active':'' ?>" title="<?= $isFav?'Remove from favorites':'Add to favorites' ?>"><i class="fas fa-heart"></i></button></form>
-            <form method="post" onclick="event.stopPropagation()" style="display:inline"><?= csrf_field() ?><input type="hidden" name="_compare" value="1"><input type="hidden" name="product_id" value="<?= $pid ?>"><button type="submit" class="cat-card-cmp <?= $isCmp?'active':'' ?>" title="<?= $isCmp?'Remove from comparison':'Add to compare' ?>"><?= count($compareIds) ?>/4 <i class="fas fa-balance-scale"></i></button></form>
-            <?php endif; ?>
-        </div>
-        <div class="cat-card-img">
-            <?php if (storage_exists($p['image_path'], 'products')): ?><img src="<?= htmlspecialchars(storage_url($p['image_path'], 'products')) ?>" alt=""><?php else: ?><span class="no-img"><i class="fas fa-pills"></i></span><?php endif; ?>
-            <div class="cat-card-badge">
-                <span class="cat-badge <?= $sb[1] ?>"><i class="fas <?= $sb[2] ?>"></i> <?= $sb[0] ?></span>
-                <?php if ($catShowInternal && $expSoon): ?><span class="cat-badge exp"><i class="fas fa-hourglass-half"></i> Exp <?= date('M Y', strtotime($earliest)) ?></span><?php endif; ?>
-                <?php if ($isFrq): ?><span class="cat-badge freq"><i class="fas fa-fire"></i> Popular</span><?php endif; ?>
-                <?php if (!empty($p['requires_prescription'])): ?><span class="cat-badge rx"><i class="fas fa-prescription"></i> Rx</span><?php endif; ?>
-            </div>
-            <button type="button" class="cat-qv" onclick="catQuickView(event)"><i class="fas fa-eye"></i> Quick View</button>
-        </div>
-        <div class="cat-card-body">
-            <h3 class="cat-card-name"><?= htmlspecialchars($p['name']) ?></h3>
-            <p class="cat-card-sub"><?= htmlspecialchars(($p['generic_name'] ?? '') ?: ($p['brand'] ?? '')) ?></p>
-            <dl class="cat-card-details">
-                <?php if ($p['strength']): ?><dt>Strength</dt><dd><?= htmlspecialchars($p['strength']) ?></dd><?php endif; ?>
-                <?php if ($p['dosage_form']): ?><dt>Dosage Form</dt><dd><?= htmlspecialchars($p['dosage_form']) ?></dd><?php endif; ?>
-                <?php if ($p['category_name']): ?><dt>Category</dt><dd><?= htmlspecialchars($p['category_name']) ?></dd><?php endif; ?>
-                <?php if ($p['manufacturer']): ?><dt>Manufacturer</dt><dd><?= htmlspecialchars($p['manufacturer']) ?></dd><?php endif; ?>
-                <?php if ($p['pack_size']): ?><dt>Pack Size</dt><dd><?= htmlspecialchars($p['pack_size']) ?></dd><?php endif; ?>
-            </dl>
-            <?php if ($p['country_of_origin']): ?><div class="cat-card-origin"><?= countryFlag($p['country_of_origin']) ?> <?= htmlspecialchars($p['country_of_origin']) ?></div><?php endif; ?>
-            <div class="cat-stock" style="border-top:none;padding-top:4px;margin-top:6px">
-                <span class="cat-badge <?= $sb[1] ?>"><i class="fas <?= $sb[2] ?>"></i> <?= $sb[0] ?></span>
-            </div>
-        </div>
-        <div class="cat-card-footer" style="flex-direction:column;align-items:stretch;gap:8px">
-            <div class="cat-card-price" style="text-align:left"><?= fmt((float)$p['price']) ?></div>
-            <div style="display:flex;flex-direction:column;gap:8px">
-                <button type="button" class="cat-card-order ghost" onclick="event.stopPropagation();showCatDetail(this.closest('.cat-card'))" style="justify-content:center"><i class="fas fa-eye"></i> View Details</button>
-                <?php if ($isCustomerUser): ?>
+            <div class="cat-order-bar">
                 <?php if ($stock <= 0): ?>
-                <button class="cat-card-order" disabled onclick="event.stopPropagation()" title="Out of stock" style="justify-content:center"><i class="fas fa-times-circle"></i> Out of Stock</button>
+                    <button class="cat-btn-add out" disabled><i class="fas fa-ban"></i> Out of Stock</button>
+                <?php elseif ($isCustomerUser): ?>
+                    <div class="cat-stepper">
+                        <button type="button" class="cat-step-btn minus" onclick="stepQty(this, -1)">−</button>
+                        <input type="number" class="cat-step-input" value="1" min="1" max="<?= max(1, $stock) ?>" data-pid="<?= $pid ?>" onchange="validateStep(this)">
+                        <button type="button" class="cat-step-btn plus" onclick="stepQty(this, 1)">+</button>
+                    </div>
+                    <a href="index.php?page=place_order&product_id=<?= $pid ?>&qty=1" class="cat-btn-add" onclick="submitToOrder(event, this, <?= $pid ?>)">
+                        <i class="fas fa-cart-plus"></i> Add
+                    </a>
                 <?php else: ?>
-                <a class="cat-card-order" href="index.php?page=place_order&product_id=<?= $pid ?>" onclick="event.stopPropagation()" style="justify-content:center"><i class="fas fa-cart-plus"></i> Add to Order</a>
-                <?php endif; ?>
-                <?php else: ?>
-                <a class="cat-card-order login" href="index.php?page=login" onclick="event.stopPropagation()" style="justify-content:center"><i class="fas fa-sign-in-alt"></i> Sign In</a>
+                    <a href="index.php?page=login" class="cat-btn-add login"><i class="fas fa-sign-in-alt"></i> Sign in</a>
                 <?php endif; ?>
             </div>
+            <button type="button" class="cat-btn-specs" onclick="showCatDetail(this.closest('.cat-list-item'))" title="Quick specs"><i class="fas fa-eye"></i></button>
         </div>
     </div>
     <?php endforeach; ?>
 </div>
 <?php endif; ?>
 <?php endif; ?>
-</section>
 
-<!-- Product Detail Modal -->
-<div class="pd-overlay" id="pdOverlay" onclick="if(event.target===this)closeCatDetail()">
-    <div class="pd-modal">
-        <div class="pd-header">
-            <div class="pd-img" id="pdImg"><span class="no-img"><i class="fas fa-pills"></i></span></div>
-            <div style="flex:1;min-width:0">
-                <h2 class="pd-title" id="pdName"></h2>
-                <p class="pd-sub" id="pdSub"></p>
-                <p style="font-size:0.78rem;color:#94a3b8;margin:2px 0 0;font-family:monospace" id="pdSku"></p>
-            </div>
-            <button class="pd-close" onclick="closeCatDetail()">&times;</button>
+<!-- ════════════ FLOATING COMPARISON DRAWER ════════════ -->
+<?php if (!empty($compareProducts)): ?>
+<div class="cat-compare-drawer" id="catCompareDrawer">
+    <div class="cat-cmp-icon-badge"><i class="fa-solid fa-scale-balanced"></i></div>
+    <div>
+        <div style="font-weight:800;font-size:0.9rem">Comparing <?= count($compareProducts) ?> Products</div>
+        <div style="font-size:0.75rem;color:#94a3b8;max-width:320px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+            <?= htmlspecialchars(implode(', ', array_map(fn($cp) => $cp['name'], $compareProducts))) ?>
         </div>
-        <div class="pd-body">
-            <div id="pdDesc" style="display:none"><p style="font-size:0.88rem;color:#475569;line-height:1.6;margin:0 0 12px" id="pdDescText"></p></div>
-            <div class="pd-grid" id="pdGrid"></div>
-            <div id="pdStorage" class="pd-section" style="display:none"><div class="pd-section-title"><i class="fas fa-thermometer-half"></i> Storage</div><p style="font-size:0.85rem;color:#475569;margin:0" id="pdStorageText"></p></div>
-            <?php if ($catShowInternal): ?><div id="pdBatches" class="pd-section" style="display:none"><div class="pd-section-title"><i class="fas fa-layer-group"></i> Available Batches</div><div id="pdBatchList"></div></div><?php endif; ?>
-            <div class="pd-section"><div class="pd-section-title"><i class="fas fa-box"></i> Availability</div><div id="pdStockBar"></div></div>
-        </div>
-        <div class="pd-footer" style="flex-wrap:wrap;gap:10px">
+    </div>
+    <button type="button" class="cat-cmp-btn-view" onclick="openCompareModal()"><i class="fas fa-columns"></i> View Comparison</button>
+    <form method="post" style="display:inline">
+        <?= csrf_field() ?>
+        <input type="hidden" name="_compare_clear" value="1">
+        <button type="submit" class="cat-cmp-btn-clear" title="Clear comparison list"><i class="fas fa-times"></i> Clear</button>
+    </form>
+</div>
+<?php endif; ?>
+
+<!-- ════════════ COMPARISON MODAL ════════════ -->
+<div class="cat-modal-backdrop" id="catCompareModal" onclick="if(event.target===this)closeCompareModal()">
+    <div class="cat-modal-sheet wide">
+        <div class="cat-modal-head">
             <div>
-                <span id="pdPrice" style="font-size:1.2rem;font-weight:800;color:#1e293b"></span>
-                <span id="pdWp" style="display:none;font-size:0.78rem;color:#2563eb;font-weight:600;margin-left:8px"></span>
+                <h3 class="cat-modal-head-title"><i class="fa-solid fa-scale-balanced" style="color:var(--cat-blue-600)"></i> Side-by-Side Product Comparison</h3>
+                <p class="cat-modal-head-sub">Compare clinical specifications, strength, prices, and stock availability across brands</p>
             </div>
-            <a id="pdOrderBtn" href="#" class="cat-card-order" style="padding:10px 24px;font-size:0.9rem"><i class="fas fa-cart-plus"></i> Add to Order</a>
+            <button type="button" class="cat-modal-close-btn" onclick="closeCompareModal()">&times;</button>
+        </div>
+        <div class="cat-modal-content">
+            <?php if (!empty($compareProducts)): ?>
+            <div class="cat-compare-table-wrap">
+                <table class="cat-compare-table">
+                    <thead>
+                        <tr>
+                            <th class="spec-name">Attribute</th>
+                            <?php foreach ($compareProducts as $cp): ?>
+                                <th>
+                                    <div style="font-weight:800;font-size:0.95rem;color:var(--cat-title)"><?= htmlspecialchars($cp['name']) ?></div>
+                                    <div style="font-size:0.78rem;color:var(--cat-muted);font-style:italic"><?= htmlspecialchars($cp['generic_name'] ?: ($cp['brand'] ?: '—')) ?></div>
+                                    <div style="font-size:1.1rem;font-weight:800;color:var(--cat-blue-600);margin-top:4px"><?= fmt((float)$cp['price']) ?></div>
+                                </th>
+                            <?php endforeach; ?>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="spec-name"><i class="fas fa-tag"></i> Category</td>
+                            <?php foreach ($compareProducts as $cp): ?><td><?= htmlspecialchars($cp['category_name'] ?? '—') ?></td><?php endforeach; ?>
+                        </tr>
+                        <tr>
+                            <td class="spec-name"><i class="fas fa-capsules"></i> Dosage Form</td>
+                            <?php foreach ($compareProducts as $cp): ?><td><strong><?= htmlspecialchars($cp['dosage_form'] ?? '—') ?></strong></td><?php endforeach; ?>
+                        </tr>
+                        <tr>
+                            <td class="spec-name"><i class="fas fa-weight-scale"></i> Strength</td>
+                            <?php foreach ($compareProducts as $cp): ?><td><strong><?= htmlspecialchars($cp['strength'] ?? '—') ?></strong></td><?php endforeach; ?>
+                        </tr>
+                        <tr>
+                            <td class="spec-name"><i class="fas fa-industry"></i> Manufacturer</td>
+                            <?php foreach ($compareProducts as $cp): ?><td><?= htmlspecialchars($cp['manufacturer'] ?? '—') ?></td><?php endforeach; ?>
+                        </tr>
+                        <tr>
+                            <td class="spec-name"><i class="fas fa-globe"></i> Origin</td>
+                            <?php foreach ($compareProducts as $cp): ?><td><?= countryFlag($cp['country_of_origin'] ?? '') ?> <?= htmlspecialchars($cp['country_of_origin'] ?? '—') ?></td><?php endforeach; ?>
+                        </tr>
+                        <tr>
+                            <td class="spec-name"><i class="fas fa-prescription"></i> Prescription</td>
+                            <?php foreach ($compareProducts as $cp): ?><td><?= !empty($cp['requires_prescription']) ? '<span class="cat-pill-badge rx" style="font-size:0.7rem">Rx Required</span>' : '<span class="cat-pill-badge otc" style="font-size:0.7rem">OTC</span>' ?></td><?php endforeach; ?>
+                        </tr>
+                        <tr>
+                            <td class="spec-name"><i class="fas fa-boxes-stacked"></i> Stock Status</td>
+                            <?php foreach ($compareProducts as $cp): ?><td><?= (int)$cp['stock_quantity'] > 0 ? '<span style="color:var(--cat-emerald);font-weight:700">● In Stock (' . (int)$cp['stock_quantity'] . ')</span>' : '<span style="color:var(--cat-rose);font-weight:700">Out of Stock</span>' ?></td><?php endforeach; ?>
+                        </tr>
+                        <tr style="background:var(--cat-bg-alt)">
+                            <td class="spec-name">Quick Action</td>
+                            <?php foreach ($compareProducts as $cp): ?>
+                                <td>
+                                    <?php if ((int)$cp['stock_quantity'] > 0 && $isCustomerUser): ?>
+                                        <a href="index.php?page=place_order&product_id=<?= (int)$cp['id'] ?>&qty=1" class="cat-btn-add" style="padding:7px 14px"><i class="fas fa-cart-plus"></i> Order Now</a>
+                                    <?php elseif ((int)$cp['stock_quantity'] <= 0): ?>
+                                        <span style="font-size:0.8rem;color:var(--cat-faint)">Unavailable</span>
+                                    <?php else: ?>
+                                        <a href="index.php?page=login" class="cat-btn-add login" style="padding:7px 14px">Sign in</a>
+                                    <?php endif; ?>
+                                </td>
+                            <?php endforeach; ?>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <?php else: ?>
+                <p style="text-align:center;color:var(--cat-muted);padding:30px 0">No products currently selected for comparison.</p>
+            <?php endif; ?>
         </div>
     </div>
 </div>
+
+<!-- ════════════ CLINICAL SPECS MODAL (Quick View) ════════════ -->
+<div class="cat-modal-backdrop" id="pdOverlay" onclick="if(event.target===this)closeCatDetail()">
+    <div class="cat-modal-sheet">
+        <div class="cat-modal-head">
+            <div style="display:flex;gap:14px;align-items:center">
+                <div id="pdModalThumb" style="width:56px;height:56px;border-radius:12px;background:var(--cat-bg-subtle);display:flex;align-items:center;justify-content:center;font-size:1.6rem;color:var(--cat-blue-600);border:1px solid var(--cat-border);overflow:hidden;flex-shrink:0"></div>
+                <div>
+                    <h3 class="cat-modal-head-title" id="pdName"></h3>
+                    <p class="cat-modal-head-sub" id="pdSub"></p>
+                    <span id="pdSku" style="font-size:0.75rem;font-family:monospace;color:var(--cat-faint)"></span>
+                </div>
+            </div>
+            <button type="button" class="cat-modal-close-btn" onclick="closeCatDetail()">&times;</button>
+        </div>
+        <div class="cat-modal-content">
+            <div id="pdDesc" style="display:none;margin-bottom:18px">
+                <div style="font-size:0.75rem;font-weight:700;color:var(--cat-muted);text-transform:uppercase;margin-bottom:4px"><i class="fas fa-file-medical"></i> Product Overview</div>
+                <p style="font-size:0.88rem;color:var(--cat-body);line-height:1.6;margin:0" id="pdDescText"></p>
+            </div>
+            
+            <div style="font-size:0.75rem;font-weight:700;color:var(--cat-muted);text-transform:uppercase;margin-bottom:8px"><i class="fas fa-clipboard-list"></i> Clinical Specifications</div>
+            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px" id="pdGrid"></div>
+
+            <div id="pdStorage" style="display:none;margin-top:16px;padding-top:16px;border-top:1px dashed var(--cat-border)">
+                <div style="font-size:0.75rem;font-weight:700;color:var(--cat-muted);text-transform:uppercase;margin-bottom:4px"><i class="fas fa-thermometer-half"></i> Storage &amp; Handling</div>
+                <p style="font-size:0.85rem;color:var(--cat-body);margin:0" id="pdStorageText"></p>
+            </div>
+
+            <?php if ($catShowInternal): ?>
+            <div id="pdBatches" style="display:none;margin-top:16px;padding-top:16px;border-top:1px dashed var(--cat-border)">
+                <div style="font-size:0.75rem;font-weight:700;color:var(--cat-muted);text-transform:uppercase;margin-bottom:6px"><i class="fas fa-boxes-stacked"></i> Active Batches (FEFO Tracked)</div>
+                <div id="pdBatchList" style="display:flex;flex-direction:column;gap:6px"></div>
+            </div>
+            <?php endif; ?>
+
+            <div style="margin-top:16px;padding-top:16px;border-top:1px dashed var(--cat-border)">
+                <div style="font-size:0.75rem;font-weight:700;color:var(--cat-muted);text-transform:uppercase;margin-bottom:6px"><i class="fas fa-warehouse"></i> Warehouse Availability</div>
+                <div id="pdStockBar"></div>
+            </div>
+        </div>
+        <div class="cat-modal-foot">
+            <div>
+                <span id="pdPrice" style="font-size:1.35rem;font-weight:800;color:var(--cat-title)"></span>
+                <span id="pdWp" style="display:none;font-size:0.8rem;color:var(--cat-emerald);font-weight:700;margin-left:8px;background:var(--cat-emerald-bg);padding:2px 8px;border-radius:6px"></span>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px">
+                <div class="cat-stepper" id="pdModalStepper">
+                    <button type="button" class="cat-step-btn minus" onclick="stepQty(this, -1)">−</button>
+                    <input type="number" class="cat-step-input" id="pdModalQty" value="1" min="1" max="9999" onchange="validateStep(this)">
+                    <button type="button" class="cat-step-btn plus" onclick="stepQty(this, 1)">+</button>
+                </div>
+                <a id="pdOrderBtn" href="#" class="cat-btn-add" style="padding:10px 24px;font-size:0.92rem"><i class="fas fa-cart-plus"></i> Add to Order</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+</div><!-- /.cat-wrap -->
 
 <script>
 var CAT_INTERNAL = <?= $catShowInternal ? 'true' : 'false' ?>;
-function catQuickView(e){e.stopPropagation();var c=e.currentTarget.closest('.cat-card');if(c)showCatDetail(c)}
-function showCatDetail(el){
-    if(!el||!el.dataset)return;
-    var o=document.getElementById('pdOverlay');
-    document.getElementById('pdName').textContent=el.dataset.name||'';
-    document.getElementById('pdSub').textContent=[el.dataset.generic,el.dataset.brand].filter(Boolean).join(' — ');
-    document.getElementById('pdSku').textContent=el.dataset.barcode?'SKU: '+el.dataset.barcode:'';
-    document.getElementById('pdPrice').textContent=el.dataset.price||'';
-    var wp=document.getElementById('pdWp');
-    if(el.dataset.wp){wp.textContent='Wholesale (pickup): '+el.dataset.wp;wp.style.display='inline'}else{wp.style.display='none'}
-    var img=document.getElementById('pdImg');
-    if(el.dataset.image){img.innerHTML='<img src="'+el.dataset.image+'" alt="">'}else{img.innerHTML='<span class="no-img"><i class="fas fa-pills"></i></span>'}
-    var dd=document.getElementById('pdDesc');if(el.dataset.desc){document.getElementById('pdDescText').textContent=el.dataset.desc;dd.style.display='block'}else{dd.style.display='none'}
-    var st=document.getElementById('pdStorage');if(el.dataset.storage){document.getElementById('pdStorageText').textContent=el.dataset.storage;st.style.display='block'}else{st.style.display='none'}
-    var fields=[];
-    if(el.dataset.strength)fields.push(['Strength',el.dataset.strength]);
-    if(el.dataset.dosage)fields.push(['Dosage Form',el.dataset.dosage]);
-    if(el.dataset.pack)fields.push(['Pack Size',el.dataset.pack]);
-    if(el.dataset.unit)fields.push(['Unit',el.dataset.unit]);
-    if(el.dataset.mfr)fields.push(['Manufacturer',el.dataset.mfr]);
-    if(el.dataset.country)fields.push(['Origin',el.dataset.country]);
-    if(el.dataset.category)fields.push(['Category',el.dataset.category]);
-    if(el.dataset.mfg)fields.push(['Mfg Date',el.dataset.mfg]);
-    if(el.dataset.rx==='1')fields.push(['Prescription','Required']);
-    document.getElementById('pdGrid').innerHTML=fields.map(function(f){return '<div class="pd-field"><dt>'+f[0]+'</dt><dd>'+f[1]+'</dd></div>'}).join('');
-    var avail=String(el.dataset.avail)==='1';
-    var bd=document.getElementById('pdBatches');
-    if(CAT_INTERNAL&&bd){
-        try{var batches=JSON.parse(el.dataset.batches||'[]');var bl=document.getElementById('pdBatchList');
-        if(batches.length>0){bl.innerHTML=batches.map(function(b){var exp=new Date(b.expiry);var now=new Date();var mo=(exp.getFullYear()-now.getFullYear())*12+(exp.getMonth()-now.getMonth());var c=mo<=3?'color:#dc2626;background:#fef2f2':mo<=6?'color:#d97706;background:#fffbeb':'color:#475569;background:#f8fafc';return '<div class="pd-batch"><span style="font-weight:600">'+b.batch+'</span><span style="padding:2px 8px;border-radius:6px;font-weight:600;font-size:0.78rem;'+c+'">Exp: '+b.expiry+'</span></div>'}).join('');bd.style.display='block'}else{bd.style.display='none'}}catch(e){bd.style.display='none'}
-    } else if(bd){bd.style.display='none'}
-    var sbEl=document.getElementById('pdStockBar');
-    if(!avail){
-        sbEl.innerHTML='<span class="cat-badge out" style="font-size:0.8rem;padding:6px 14px"><i class="fas fa-times-circle"></i> OUT OF STOCK</span>';
-    }else if(CAT_INTERNAL&&String(el.dataset.lowstock)==='1'){
-        sbEl.innerHTML='<span class="cat-badge low" style="font-size:0.8rem;padding:6px 14px"><i class="fas fa-exclamation-triangle"></i> LOW STOCK</span>';
-    }else{
-        sbEl.innerHTML='<span class="cat-badge in" style="font-size:0.8rem;padding:6px 14px"><i class="fas fa-check-circle"></i> IN STOCK</span>';
-    }
-    var btn=document.getElementById('pdOrderBtn');
-    <?php if ($isCustomerUser): ?>if(!avail){btn.href='#';btn.setAttribute('disabled','disabled');btn.innerHTML='<i class="fas fa-times-circle"></i> Out of Stock'}else{btn.removeAttribute('disabled');btn.href='index.php?page=place_order&product_id='+el.dataset.pid;btn.innerHTML='<i class="fas fa-cart-plus"></i> Add to Order'}btn.style.display='';
-    <?php else: ?>btn.href='index.php?page=login';btn.style.display='';<?php endif; ?>
-    o.style.display='flex';
-    if(window.history&&window.history.replaceState){window.history.replaceState({},'',window.location.pathname+'?page=catalog&view_product='+el.dataset.pid)}
-}
-function closeCatDetail(){document.getElementById('pdOverlay').style.display='none'}
-document.addEventListener('keydown',function(e){if(e.key==='Escape')closeCatDetail()});
 
-document.getElementById('catScanBtn').addEventListener('click',function(){var i=document.getElementById('catBarcodeInput');i.style.position='relative';i.style.left='0';i.style.opacity='1';i.focus()});
-document.getElementById('catBarcodeInput').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();var c=this.value.trim();if(!c)return;document.getElementById('catSearchInput').value=c;document.getElementById('catSearchForm').submit()}});
-document.addEventListener('barcode-scanned',function(e){var i=document.getElementById('catBarcodeInput');if(i){i.value=e.detail.code;i.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}))}});
+/* Stepper logic */
+function stepQty(btn, delta) {
+    var wrap = btn.closest('.cat-stepper');
+    var input = wrap.querySelector('.cat-step-input');
+    var val = parseInt(input.value) || 1;
+    var max = parseInt(input.getAttribute('max')) || 99999;
+    var min = parseInt(input.getAttribute('min')) || 1;
+    val = Math.max(min, Math.min(max, val + delta));
+    input.value = val;
+
+    var container = wrap.closest('.cat-order-bar') || wrap.closest('.cat-modal-foot');
+    if (container) {
+        var orderBtn = container.querySelector('.cat-btn-add, #pdOrderBtn');
+        if (orderBtn && orderBtn.href && orderBtn.href.indexOf('place_order') !== -1) {
+            var url = new URL(orderBtn.href, window.location.origin);
+            url.searchParams.set('qty', val);
+            orderBtn.href = url.pathname + url.search;
+        }
+    }
+}
+
+function validateStep(input) {
+    var val = parseInt(input.value) || 1;
+    var max = parseInt(input.getAttribute('max')) || 99999;
+    var min = parseInt(input.getAttribute('min')) || 1;
+    val = Math.max(min, Math.min(max, val));
+    input.value = val;
+
+    var container = input.closest('.cat-order-bar') || input.closest('.cat-modal-foot');
+    if (container) {
+        var orderBtn = container.querySelector('.cat-btn-add, #pdOrderBtn');
+        if (orderBtn && orderBtn.href && orderBtn.href.indexOf('place_order') !== -1) {
+            var url = new URL(orderBtn.href, window.location.origin);
+            url.searchParams.set('qty', val);
+            orderBtn.href = url.pathname + url.search;
+        }
+    }
+}
+
+function submitToOrder(e, link, pid) {
+    e.stopPropagation();
+    var wrap = link.closest('.cat-order-bar');
+    var qty = 1;
+    if (wrap) {
+        var input = wrap.querySelector('.cat-step-input');
+        if (input) qty = parseInt(input.value) || 1;
+    }
+    link.href = 'index.php?page=place_order&product_id=' + pid + '&qty=' + qty;
+}
+
+/* Instant live search on keystroke */
+var searchTimer = null;
+var searchInput = document.getElementById('catSearchInput');
+if (searchInput) {
+    searchInput.addEventListener('input', function() {
+        var query = this.value.trim().toLowerCase();
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(function() {
+            var items = document.querySelectorAll('.cat-card, .cat-list-item');
+            var matched = 0;
+            items.forEach(function(item) {
+                if (!query) {
+                    item.style.display = '';
+                    matched++;
+                    return;
+                }
+                var hay = (item.dataset.name + ' ' + (item.dataset.generic||'') + ' ' + (item.dataset.brand||'') + ' ' + (item.dataset.dosage||'') + ' ' + (item.dataset.strength||'') + ' ' + (item.dataset.mfr||'') + ' ' + (item.dataset.category||'') + ' ' + (item.dataset.barcode||'')).toLowerCase();
+                if (hay.indexOf(query) !== -1) {
+                    item.style.display = '';
+                    matched++;
+                } else {
+                    item.style.display = 'none';
+                }
+            });
+            var emptyNotice = document.getElementById('catLiveEmptyNotice');
+            if (emptyNotice) {
+                emptyNotice.style.display = (matched === 0 && query !== '') ? 'block' : 'none';
+            }
+            var countEl = document.getElementById('catLiveCount');
+            if (countEl) {
+                countEl.textContent = matched;
+            }
+        }, 120);
+    });
+}
+
+/* Favorites toggle with AJAX and toast */
+function catToggleFav(e, pid) {
+    e.stopPropagation();
+    var btn = e.currentTarget;
+    var icon = btn.querySelector('i');
+    var isFav = btn.classList.contains('active');
+
+    btn.classList.toggle('active');
+    if (icon) {
+        icon.className = isFav ? 'fa-regular fa-heart' : 'fa-solid fa-heart';
+    }
+
+    var formData = new FormData();
+    formData.append('_fav', '1');
+    formData.append('product_id', pid);
+    formData.append('csrf_token', typeof csrfToken !== 'undefined' ? csrfToken : '');
+
+    fetch(window.location.href, {
+        method: 'POST',
+        body: formData,
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    }).then(function(res) {
+        if (typeof showToast === 'function') {
+            showToast(isFav ? 'Removed from favorites' : 'Added to favorites', 'success');
+        }
+    }).catch(function() {});
+}
+
+/* Compare toggle */
+function catToggleCmp(e, pid) {
+    e.stopPropagation();
+    var formData = new FormData();
+    formData.append('_compare', '1');
+    formData.append('product_id', pid);
+    formData.append('csrf_token', typeof csrfToken !== 'undefined' ? csrfToken : '');
+
+    fetch(window.location.href, {
+        method: 'POST',
+        body: formData
+    }).then(function() {
+        window.location.reload();
+    });
+}
+
+function openCompareModal() {
+    var modal = document.getElementById('catCompareModal');
+    if (modal) modal.style.display = 'flex';
+}
+function closeCompareModal() {
+    var modal = document.getElementById('catCompareModal');
+    if (modal) modal.style.display = 'none';
+}
+
+/* Quick View details sheet */
+function catQuickView(e) {
+    e.stopPropagation();
+    var card = e.currentTarget.closest('.cat-card, .cat-list-item');
+    if (card) showCatDetail(card);
+}
+
+function showCatDetail(el) {
+    if (!el || !el.dataset) return;
+    var modal = document.getElementById('pdOverlay');
+
+    document.getElementById('pdName').textContent = el.dataset.name || '';
+    document.getElementById('pdSub').textContent = [el.dataset.generic, el.dataset.brand].filter(Boolean).join(' — ');
+    document.getElementById('pdSku').textContent = el.dataset.barcode ? 'Barcode: ' + el.dataset.barcode : '';
+    document.getElementById('pdPrice').textContent = el.dataset.price || '';
+
+    var wp = document.getElementById('pdWp');
+    if (el.dataset.wp) {
+        wp.textContent = 'Wholesale: ' + el.dataset.wp;
+        wp.style.display = 'inline-block';
+    } else {
+        wp.style.display = 'none';
+    }
+
+    var thumb = document.getElementById('pdModalThumb');
+    if (el.dataset.image) {
+        thumb.innerHTML = '<img src="' + el.dataset.image + '" alt="" style="width:100%;height:100%;object-fit:contain">';
+    } else {
+        thumb.innerHTML = '<i class="fa-solid fa-pills"></i>';
+    }
+
+    var dd = document.getElementById('pdDesc');
+    if (el.dataset.desc) {
+        document.getElementById('pdDescText').textContent = el.dataset.desc;
+        dd.style.display = 'block';
+    } else {
+        dd.style.display = 'none';
+    }
+
+    var st = document.getElementById('pdStorage');
+    if (el.dataset.storage) {
+        document.getElementById('pdStorageText').textContent = el.dataset.storage;
+        st.style.display = 'block';
+    } else {
+        st.style.display = 'none';
+    }
+
+    var fields = [];
+    if (el.dataset.dosage) fields.push(['Dosage Form', el.dataset.dosage]);
+    if (el.dataset.strength) fields.push(['Strength', el.dataset.strength]);
+    if (el.dataset.pack) fields.push(['Pack Size', el.dataset.pack]);
+    if (el.dataset.unit) fields.push(['Unit', el.dataset.unit]);
+    if (el.dataset.mfr) fields.push(['Manufacturer', el.dataset.mfr]);
+    if (el.dataset.country) fields.push(['Country of Origin', el.dataset.country]);
+    if (el.dataset.category) fields.push(['Category', el.dataset.category]);
+    if (el.dataset.mfg) fields.push(['Mfg Date', el.dataset.mfg]);
+    if (el.dataset.rx === '1') fields.push(['Prescription Status', 'Rx Required by Law']);
+
+    document.getElementById('pdGrid').innerHTML = fields.map(function(f) {
+        return '<div style="background:var(--cat-bg-alt);border:1px solid var(--cat-border);border-radius:8px;padding:8px 12px"><div style="font-size:0.7rem;font-weight:700;color:var(--cat-muted);text-transform:uppercase">' + f[0] + '</div><div style="font-size:0.86rem;font-weight:700;color:var(--cat-title);margin-top:2px">' + f[1] + '</div></div>';
+    }).join('');
+
+    var avail = String(el.dataset.avail) === '1';
+    var bd = document.getElementById('pdBatches');
+    if (CAT_INTERNAL && bd) {
+        try {
+            var batches = JSON.parse(el.dataset.batches || '[]');
+            var bl = document.getElementById('pdBatchList');
+            if (batches.length > 0) {
+                bl.innerHTML = batches.map(function(b) {
+                    return '<div style="display:flex;justify-content:space-between;align-items:center;background:var(--cat-bg-alt);border:1px solid var(--cat-border);border-radius:8px;padding:8px 12px;font-size:0.82rem"><span><strong>' + b.batch + '</strong> (' + b.qty + ' units)</span><span style="color:var(--cat-emerald);font-weight:700">Exp: ' + b.expiry + '</span></div>';
+                }).join('');
+                bd.style.display = 'block';
+            } else {
+                bd.style.display = 'none';
+            }
+        } catch (e) {
+            bd.style.display = 'none';
+        }
+    }
+
+    var sbEl = document.getElementById('pdStockBar');
+    if (!avail) {
+        sbEl.innerHTML = '<span class="cat-pill-badge out" style="padding:6px 14px;font-size:0.8rem"><i class="fas fa-times-circle"></i> Out of Stock</span>';
+    } else if (CAT_INTERNAL && String(el.dataset.lowstock) === '1') {
+        sbEl.innerHTML = '<span class="cat-pill-badge low" style="padding:6px 14px;font-size:0.8rem"><i class="fas fa-exclamation-triangle"></i> Low Stock</span>';
+    } else {
+        sbEl.innerHTML = '<span class="cat-pill-badge in" style="padding:6px 14px;font-size:0.8rem"><i class="fas fa-check-circle"></i> In Stock &bull; Ready for Dispatch</span>';
+    }
+
+    var btn = document.getElementById('pdOrderBtn');
+    var qtyInput = document.getElementById('pdModalQty');
+    if (qtyInput) qtyInput.value = 1;
+
+    <?php if ($isCustomerUser): ?>
+    if (!avail) {
+        btn.href = '#';
+        btn.classList.add('out');
+        btn.innerHTML = '<i class="fas fa-ban"></i> Out of Stock';
+    } else {
+        btn.classList.remove('out');
+        btn.href = 'index.php?page=place_order&product_id=' + el.dataset.pid + '&qty=1';
+        btn.innerHTML = '<i class="fas fa-cart-plus"></i> Add to Order';
+    }
+    <?php else: ?>
+    btn.href = 'index.php?page=login';
+    btn.classList.add('login');
+    btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Sign in to Order';
+    <?php endif; ?>
+
+    modal.style.display = 'flex';
+}
+
+function closeCatDetail() {
+    var modal = document.getElementById('pdOverlay');
+    if (modal) modal.style.display = 'none';
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        closeCatDetail();
+        closeCompareModal();
+    }
+});
+
+/* Barcode handling */
+var scanBtn = document.getElementById('catScanBtn');
+if (scanBtn) {
+    scanBtn.addEventListener('click', function() {
+        var i = document.getElementById('catBarcodeInput');
+        if (i) {
+            i.style.position = 'relative';
+            i.style.left = '0';
+            i.style.opacity = '1';
+            i.focus();
+        }
+    });
+}
+var barcodeInput = document.getElementById('catBarcodeInput');
+if (barcodeInput) {
+    barcodeInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            var code = this.value.trim();
+            if (!code) return;
+            var sInput = document.getElementById('catSearchInput');
+            if (sInput) sInput.value = code;
+            document.getElementById('catSearchForm').submit();
+        }
+    });
+}
+document.addEventListener('barcode-scanned', function(e) {
+    var sInput = document.getElementById('catSearchInput');
+    if (sInput && e.detail && e.detail.code) {
+        sInput.value = e.detail.code;
+        document.getElementById('catSearchForm').submit();
+    }
+});
 </script>
