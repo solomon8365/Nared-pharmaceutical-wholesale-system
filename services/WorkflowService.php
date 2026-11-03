@@ -222,7 +222,7 @@ class WorkflowService
                 }
             }
 
-            $pdo->commit();
+            if ($pdo->inTransaction()) { $pdo->commit(); }
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) $pdo->rollBack();
             throw $e instanceof ServiceException ? $e : new ServiceException('Approval failed: ' . $e->getMessage());
